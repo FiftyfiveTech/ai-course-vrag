@@ -10,6 +10,8 @@ dev = ["pytest>=8.0"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# so tests can `from src.doctor import ...` without an editable install
+pythonpath = ["."]
 
 [build-system]
 requires = ["hatchling"]

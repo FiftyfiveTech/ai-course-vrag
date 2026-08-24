@@ -1,8 +1,9 @@
-.PHONY: setup test gate demo clean
+.PHONY: setup doctor test gate demo clean
 .DEFAULT_GOAL := help
 
 help:
 	@echo "make setup   create the venv and install deps (uv)"
+	@echo "make doctor  check every dependency and credential; non-zero on FAIL"
 	@echo "make test    unit tests"
 	@echo "make gate    run every phase gate in tests/gates/"
 	@echo "make demo    run the thing end to end"
@@ -11,7 +12,10 @@ setup:
 	@command -v uv >/dev/null || { echo "uv not installed: curl -LsSf https://astral.sh/uv/install.sh | sh"; exit 1; }
 	uv sync
 	@test -f .env || { cp .env.example .env; echo "wrote .env from .env.example — fill it in"; }
-	@echo "ok. next: make test"
+	@echo "ok. next: make doctor"
+
+doctor:
+	uv run python -m src.doctor
 
 test:
 	uv run pytest tests -q --ignore=tests/gates
