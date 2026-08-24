@@ -7,3 +7,10 @@ uv.lock
 runs/
 *.wav
 *.mp4
+
+# VRAG-004: the corpus is pointers only. Video-MME's licence forbids redistributing it,
+# so a local working copy of any media must never be committed. See data/corpus/PROVENANCE.md
+data/corpus/media/
+*.mkv
+*.webm
+*.m4a

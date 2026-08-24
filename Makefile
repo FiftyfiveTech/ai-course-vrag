@@ -1,9 +1,12 @@
-.PHONY: setup doctor test gate demo clean
+.PHONY: setup doctor corpus corpus-check corpus-pointers test gate demo clean
 .DEFAULT_GOAL := help
 
 help:
 	@echo "make setup   create the venv and install deps (uv)"
 	@echo "make doctor  check every dependency and credential; non-zero on FAIL"
+	@echo "make corpus  re-select the 10-video corpus (streams annotations only)"
+	@echo "make corpus-check  assert the committed manifest reproduces byte-for-byte"
+	@echo "make corpus-pointers  assert all 10 videos still resolve at their source url"
 	@echo "make test    unit tests"
 	@echo "make gate    run every phase gate in tests/gates/"
 	@echo "make demo    run the thing end to end"
@@ -16,6 +19,17 @@ setup:
 
 doctor:
 	uv run python -m src.doctor
+
+corpus:
+	uv run python -m src.corpus
+
+# Network check: re-streams the pinned revision and diffs against the committed manifest.
+corpus-check:
+	uv run python -m src.corpus --check
+
+# We hold pointers, not copies, so a video can vanish out from under us. Run before ingest.
+corpus-pointers:
+	uv run python -m src.corpus --verify-pointers
 
 test:
 	uv run pytest tests -q --ignore=tests/gates
