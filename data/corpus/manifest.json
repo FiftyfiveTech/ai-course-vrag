@@ -1,0 +1,167 @@
+{
+  "task": "VRAG-004",
+  "what_this_is": "The 10-video pilot corpus: pointers only, no media and no benchmark Q&A. Regenerate with `make corpus`; verify with `make corpus-check`.",
+  "dataset": {
+    "requested_repo_id": "lmms-lab/Video-MME",
+    "canonical_repo_id": "lmms-eval/Video-MME",
+    "config": "videomme",
+    "split": "test",
+    "revision": "ead1408f75b618502df9a1d8e0950166bf0a2a0b",
+    "gated": false,
+    "read_via": "datasets.load_dataset(..., streaming=True)",
+    "annotation_files_read": [
+      "videomme/test-00000-of-00001.parquet"
+    ],
+    "media_files_skipped": {
+      "count": 20,
+      "bytes": 100994322505,
+      "note": "the benchmark's video archives — never requested; see licence"
+    }
+  },
+  "licence": {
+    "declared_on_hf": null,
+    "effective_terms": "Video-MME is only used for academic research. Commercial use in any form is prohibited.\nThe copyright of all videos belongs to the video owners.\nIf there is any infringement in Video-MME, please email videomme2024@gmail.com and we will remove it immediately.\nWithout prior approval, you cannot distribute, publish, copy, disseminate, or modify Video-MME in whole or in part.\nYou must strictly comply with the above restrictions.",
+    "source": "https://github.com/MME-Benchmarks/Video-MME#-dataset (stated in the README; neither that repo nor the HF dataset ships a LICENSE file)",
+    "our_use": "non-commercial coursework; academic research use is permitted by the terms",
+    "why_pointers_only": "the terms forbid distributing or copying Video-MME in whole or in part without prior approval, so this repo stores ids and urls, not video files and not the benchmark's questions or answers",
+    "video_copyright": "each video's copyright belongs to its original YouTube uploader"
+  },
+  "selection": {
+    "deterministic": true,
+    "rule": "one record per videoID from the streamed test split; per duration bucket, round-robin over domains least-used-first (counted across all buckets) preferring unused sub-categories, lowest video_id breaking ties; dev slots then go to the domains least represented in dev so far",
+    "duration_quota": {
+      "short": 3,
+      "medium": 3,
+      "long": 4
+    },
+    "dev_quota": {
+      "short": 1,
+      "medium": 1,
+      "long": 2
+    }
+  },
+  "counts": {
+    "total": 10,
+    "dev": 4,
+    "heldout": 6,
+    "durations": {
+      "short": 3,
+      "medium": 3,
+      "long": 4
+    },
+    "domains": 6,
+    "sub_categories": 10,
+    "per_split": {
+      "dev": {
+        "videos": 4,
+        "domains": 4,
+        "durations": [
+          "long",
+          "medium",
+          "short"
+        ]
+      },
+      "heldout": {
+        "videos": 6,
+        "domains": 6,
+        "durations": [
+          "long",
+          "medium",
+          "short"
+        ]
+      }
+    }
+  },
+  "videos": [
+    {
+      "video_id": "181",
+      "youtube_id": "8np5YKYx3sU",
+      "url": "https://www.youtube.com/watch?v=8np5YKYx3sU",
+      "duration": "short",
+      "domain": "Artistic Performance",
+      "sub_category": "Stage Play",
+      "split": "dev"
+    },
+    {
+      "video_id": "091",
+      "youtube_id": "_aVHf_jmWk8",
+      "url": "https://www.youtube.com/watch?v=_aVHf_jmWk8",
+      "duration": "short",
+      "domain": "Film & Television",
+      "sub_category": "Animation",
+      "split": "heldout"
+    },
+    {
+      "video_id": "001",
+      "youtube_id": "fFjv93ACGo8",
+      "url": "https://www.youtube.com/watch?v=fFjv93ACGo8",
+      "duration": "short",
+      "domain": "Knowledge",
+      "sub_category": "Humanity & History",
+      "split": "heldout"
+    },
+    {
+      "video_id": "521",
+      "youtube_id": "qJGqZ_g__So",
+      "url": "https://www.youtube.com/watch?v=qJGqZ_g__So",
+      "duration": "medium",
+      "domain": "Life Record",
+      "sub_category": "Handicraft",
+      "split": "dev"
+    },
+    {
+      "video_id": "591",
+      "youtube_id": "FMdEkj5HEqg",
+      "url": "https://www.youtube.com/watch?v=FMdEkj5HEqg",
+      "duration": "medium",
+      "domain": "Multilingual",
+      "sub_category": "Multilingual",
+      "split": "heldout"
+    },
+    {
+      "video_id": "431",
+      "youtube_id": "RN1ZC7Tb2Pg",
+      "url": "https://www.youtube.com/watch?v=RN1ZC7Tb2Pg",
+      "duration": "medium",
+      "domain": "Sports Competition",
+      "sub_category": "Esports",
+      "split": "heldout"
+    },
+    {
+      "video_id": "791",
+      "youtube_id": "9tBsMSDoDqk",
+      "url": "https://www.youtube.com/watch?v=9tBsMSDoDqk",
+      "duration": "long",
+      "domain": "Artistic Performance",
+      "sub_category": "Magic Show",
+      "split": "heldout"
+    },
+    {
+      "video_id": "701",
+      "youtube_id": "-dfvdKf-KR0",
+      "url": "https://www.youtube.com/watch?v=-dfvdKf-KR0",
+      "duration": "long",
+      "domain": "Film & Television",
+      "sub_category": "Movie & TV Show",
+      "split": "dev"
+    },
+    {
+      "video_id": "611",
+      "youtube_id": "H8fGd3fCJbg",
+      "url": "https://www.youtube.com/watch?v=H8fGd3fCJbg",
+      "duration": "long",
+      "domain": "Knowledge",
+      "sub_category": "Literature & Art",
+      "split": "dev"
+    },
+    {
+      "video_id": "831",
+      "youtube_id": "6Pt3-NDxzRk",
+      "url": "https://www.youtube.com/watch?v=6Pt3-NDxzRk",
+      "duration": "long",
+      "domain": "Life Record",
+      "sub_category": "Food",
+      "split": "heldout"
+    }
+  ]
+}

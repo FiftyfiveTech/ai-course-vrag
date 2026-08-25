@@ -3,13 +3,17 @@ name = "ai-course-track"
 version = "0.1.0"
 description = "<TRACK> — FiftyFive AI engineering course"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = [
+    "datasets>=2.19",
+]
 
 [dependency-groups]
 dev = ["pytest>=8.0"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# so tests can `from src.doctor import ...` without an editable install
+pythonpath = ["."]
 
 [build-system]
 requires = ["hatchling"]

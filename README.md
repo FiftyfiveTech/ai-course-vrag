@@ -19,6 +19,7 @@ other person as a collaborator with push access.
 | Path | Holds |
 |---|---|
 | `src/` | The system. Small modules, one job each. |
+| `data/corpus/` | The 10-video pilot corpus: **pointers only**, never media. `manifest.json` + `PROVENANCE.md` (licence, provenance, how the split was chosen). |
 | `prompts/` | Versioned prompt files (`extract_v1.md`, `extract_v2.md`, …). Never inline a prompt in code. |
 | `schemas/` | Pydantic models. Structured output is validated, not parsed by hand. |
 | `evals/dev/` | **Builder** tunes here. 15 cases. |
