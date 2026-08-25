@@ -53,3 +53,19 @@ Blocked:  nothing. Worth flagging for the retro: this session ran on Ritika's ma
           same person this week.
 Next:     VRAG-006 (cost meter) — ingest already records per-stage latency and ×realtime,
           so $/video-hour is the missing half.
+
+## 2026-08-25 — Ritika (Evaluator)
+Did:      VRAG-006 — shared cost/latency meter. `src/telemetry.py`: Meter class with
+          span() context manager, log(), total_cost_usd(), summary_line(). Cost rates
+          keyed by HF repo id: openai/whisper-large-v3-turbo @ $0.04/audio-hour,
+          nomic-ai/nomic-embed-text-v1.5 @ $0.00 (local). Wired into src/ingest.py —
+          meter created at pipeline start, summary_line stored in result["telemetry"]
+          and printed as the last line of every run. 16 tests in tests/test_telemetry.py.
+          PR #6 opened (feat/vrag-006 → dev).
+Number:   `.venv/bin/python -m src.ingest samples/one.mp4 --config config.toml`
+          → last line: $0.0000/video-hour  52.6×realtime
+          `.venv/bin/pytest tests -q --ignore=tests/gates` → 113 passed (was 97, +16)
+Blocked:  nothing. uv run exits 120 with no output in this environment — using
+          .venv/bin/python and .venv/bin/pytest directly as workaround.
+Next:     VRAG-011 (evals/QA_SPEC.md) — corpus is in place, cost meter is wired;
+          Q&A spec is the next Evaluator task.
