@@ -2,7 +2,9 @@
 name = "ai-course-track"
 version = "0.1.0"
 description = "<TRACK> — FiftyFive AI engineering course"
-requires-python = ">=3.10"
+# 3.11 for tomllib in the stdlib: config.toml holds the pipeline levers (VRAG-005) and a
+# config reader is not worth a third-party dependency.
+requires-python = ">=3.11"
 dependencies = [
     "datasets>=2.19",
 ]
