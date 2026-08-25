@@ -98,3 +98,12 @@ Number:   .venv/bin/pytest tests -q --ignore=tests/gates → 134 passed (was 113
 Blocked:  nothing. End-to-end test (real Groq call) deferred — needs GROQ_API_KEY
           wired in environment; unit tests cover all logic paths.
 Next:     VRAG-012 (label + seal 20 held-out Q&A pairs) — QA_SPEC.md is in place.
+
+## 2026-08-25 — Ritika (Evaluator)
+Did:      VRAG-008 end-to-end test with real Groq call on samples/one.mp4.
+Number:   .venv/bin/python -c "from src.transcript import transcribe; ..."
+          → 2 segments, $0.0400/video-hour  29.6×realtime
+          (synthetic video produces "Thank you." — expected; real corpus videos
+          will produce actual transcript text)
+Blocked:  nothing
+Next:     VRAG-012 (label + seal 20 held-out Q&A pairs)
