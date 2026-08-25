@@ -167,3 +167,64 @@ Blocked:  nothing.
 Next:     VRAG-013 (tests/gates/test_no_leakage.py) — the seal exists now, so the dev ∩
           heldout = ∅ check is what makes the blind-labelling rule enforced rather than
           agreed.
+
+## 2026-08-25 — Ritika (Evaluator)
+Did:      VRAG-013 — the blind-labelling seal. src/leakage.py computes
+          evals/dev ∩ evals/heldout by content hash; tests/gates/test_no_leakage.py is the
+          gate (24 tests). Three fingerprints per pair, sha256 over one normalised field
+          each: id, question, answer_note. Normalisation folds NFKC, case, whitespace,
+          smart quotes/dashes and trailing punctuation, so a copy-paste that changed only
+          formatting is still caught.
+          video_id is deliberately NOT compared — the video split is public and QA_SPEC §6
+          asks for held-out questions on dev videos, so flagging it would make the gate
+          unpassable. Wrote a test that pins that, so nobody "fixes" it later.
+          Two things the design had to settle:
+          (1) Id namespaces. Both splits would independently number from q001, so the id
+          fingerprint would fire on every dev case ever written — a check that always fails
+          is as useless as one that never does. heldout stays q001…q020 (it is sealed);
+          dev takes d001…. Recorded in QA_SPEC §8 with the reason. Sealed file untouched —
+          `make heldout-check` still prints the same sha256.
+          (2) evals/dev/ is empty, so the check passes vacuously today. It says so:
+          "PASS (vacuous) — evals/dev holds no pairs yet, so the intersection is empty by
+          default rather than by discipline". A silent green here would be the worst
+          outcome — it reads as verified when nothing was compared. Empty *heldout* is a
+          FAIL for the same reason: 0 ∩ 0 = ∅ is not a seal.
+          Two bugs found by running it rather than reading it, both in the report path:
+          - '∩' in the output raised UnicodeEncodeError on this cp1252 console and exited 1.
+            A gate signals a leak with exit 1, so an encoding accident was indistinguishable
+            from a leak. main() now reconfigures stdout/stderr to utf-8/replace, and the
+            printed strings are cp1252-safe. Pre-existing in src/evalset.py too (its em
+            dashes render as '?'), left alone there — flagging for the retro.
+          - stdout is block-buffered when piped, stderr is not, so the FAIL detail printed
+            before the counts it referred to. Explicit flush; the number reads first on a
+            terminal and in a redirected log.
+          Wired `make gate` to depend on leakage-check, so a leak stops the run instead of
+          appearing as one red line among the phase gates — tests/gates/README.md already
+          said no gate result counts until this passes.
+          Also removed README's "Deliberately missing" section: it listed src/telemetry.py
+          (landed in VRAG-006) and test_no_leakage.py (this task). Flagged it last session,
+          both files exist now, so the section went rather than growing more stale.
+Number:   `make leakage-check` clean → dev 0 pairs / heldout 20 pairs / compared by sha256
+          over id, question, answer_note / overlap 0 → PASS (vacuous), exit 0
+          Negative control — `head -1 evals/heldout/heldout_v1.jsonl > evals/dev/LEAK_PROBE.jsonl`
+          then `make leakage-check` → overlap 3, FAIL naming all three fingerprints and both
+          sides (evals/dev/LEAK_PROBE.jsonl:1 (q001) == evals/heldout/heldout_v1.jsonl:1
+          (q001)), exit 1. `make gate` with the same probe → exit 2, stops before the phase
+          gates. Probe removed; `git status --short` clean on evals/.
+          `uv run pytest tests/gates -q` → 24 passed
+          `uv run pytest tests -q --ignore=tests/gates` → 140 passed, 13 skipped (unchanged;
+          the new tests are all in tests/gates/, which make test excludes on purpose so a
+          red seal cannot be mistaken for an ordinary unit-test failure)
+          `make heldout-check` → same sha256 74398cbae0956271962bde9a3b51b89db766da0ae1d65802c1c56a81ab0d1084, PASS
+          $0.00 — no model calls in this task.
+Blocked:  nothing.
+          Flagging, not blocking: a content hash cannot catch a held-out question rewritten
+          from memory in different words. Documented in the module docstring, in QA_SPEC §8
+          and in a test that pins the limitation rather than papering over it. That case is
+          on review and on the Builder not opening the file — worth saying out loud at the
+          retro so the gate is not over-trusted.
+          Also: there is no board task that writes evals/dev/. README says 15 cases and
+          VRAG-016/017 score recall@5 on dev, so the cases have to exist by then. Until they
+          do this gate is vacuous, which is exactly what its output says.
+Next:     VRAG-009 (failure tests: no audio track, zero-length, unreadable codec) is the
+          next unstarted one of mine.
