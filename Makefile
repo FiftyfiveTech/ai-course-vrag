@@ -1,4 +1,4 @@
-.PHONY: setup doctor corpus corpus-check corpus-pointers sample sample-real test gate demo clean
+.PHONY: setup doctor corpus corpus-check corpus-pointers heldout-check sample sample-real test gate demo clean
 .DEFAULT_GOAL := help
 
 # The video the demo ingests, and the file the levers are read from. Both overridable:
@@ -12,6 +12,7 @@ help:
 	@echo "make corpus  re-select the 10-video corpus (streams annotations only)"
 	@echo "make corpus-check  assert the committed manifest reproduces byte-for-byte"
 	@echo "make corpus-pointers  assert all 10 videos still resolve at their source url"
+	@echo "make heldout-check  validate the sealed Q&A set and re-hash it against README"
 	@echo "make sample  generate samples/one.mp4 locally (offline; no video is committed)"
 	@echo "make sample-real VIDEO_ID=<id>  fetch one dev corpus video from its recorded url"
 	@echo "make test    unit tests"
@@ -37,6 +38,11 @@ corpus-check:
 # We hold pointers, not copies, so a video can vanish out from under us. Run before ingest.
 corpus-pointers:
 	uv run python -m src.corpus --verify-pointers
+
+# The seal on evals/heldout/. Offline: re-derives the counts and spread from the file and
+# compares its sha256 to the one recorded in README.md.
+heldout-check:
+	uv run python -m src.evalset
 
 test:
 	uv run pytest tests -q --ignore=tests/gates
