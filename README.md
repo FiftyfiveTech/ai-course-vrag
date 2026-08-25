@@ -27,8 +27,33 @@ other person as a collaborator with push access.
 | `schemas/` | Pydantic models. Structured output is validated, not parsed by hand. |
 | `evals/dev/` | **Builder** tunes here. 15 cases. |
 | `evals/heldout/` | **Evaluator** only. Sealed Wednesday, tagged `heldout-v1`. The Builder never reads it. |
+| `evals/QA_SPEC.md` | What a correct citation is (±30 s), what counts as unanswerable, how the gate scores. |
 | `tests/gates/` | One script per phase gate. It prints the number; the number decides. |
 | `STANDUP.md` | Daily log. Two minutes, append-only. |
+
+## The sealed evaluation set
+
+`evals/heldout/heldout_v1.jsonl` is the 20 pairs the MVP gate (VRAG-021) is scored on — 17
+answerable, 3 unanswerable, at least one answerable question per corpus video. Every `t_ref`
+was checked against the video it points at before the file was written; `answer_note` on each
+pair records what was seen or heard and when.
+
+| | |
+|---|---|
+| sha256 of `evals/heldout/heldout_v1.jsonl` | `74398cbae0956271962bde9a3b51b89db766da0ae1d65802c1c56a81ab0d1084` |
+| Tag | `heldout-v1` |
+| Contract | [evals/QA_SPEC.md](evals/QA_SPEC.md) |
+| Check | `make heldout-check` |
+
+The digest is the seal. `make heldout-check` re-hashes the file and compares it to the line
+above, so a question edited after the tag was pushed fails the check instead of quietly
+changing what the gate measures. It also re-derives the counts and the per-video spread from
+the file rather than trusting this table.
+
+**The Builder does not open this file.** The dev/held-out *video* split is public — it is in
+`data/corpus/manifest.json`, and the Builder has to know which six videos to avoid — but the
+held-out Q&A labels are the Evaluator's. `tests/gates/test_no_leakage.py` (VRAG-013) enforces
+`evals/dev ∩ evals/heldout = ∅` by content hash before any gate result counts.
 
 ## Deliberately missing
 
