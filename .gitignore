@@ -14,3 +14,7 @@ data/corpus/media/
 *.mkv
 *.webm
 *.m4a
+
+# VRAG-005: sample videos are generated (`make sample`) or fetched from the manifest url
+# (`make sample-real`), never committed. Same licence reason as data/corpus/media/.
+samples/

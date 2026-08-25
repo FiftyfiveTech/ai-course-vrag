@@ -1,0 +1,63 @@
+# VRAG pipeline configuration.
+#
+# Anything that is a cost or quality lever lives in this file, not in code. The point of
+# the split is that you can change what the pipeline costs without touching a module and
+# without a rebuild — and that the value that produced a run is recorded next to it, in
+# every run's media.json.
+#
+# Read by src/config.py. Every module takes the parsed table as an argument; nothing
+# reaches for a global.
+
+[ingest.audio]
+# 16 kHz mono signed 16-bit PCM. This is not a preference, it is what the ASR arms in
+# VRAG-008 want: whisper-large-v3-turbo resamples to 16 kHz internally, so handing it
+# anything richer costs upload bytes and buys nothing.
+sample_rate_hz = 16000
+channels = 1
+codec = "pcm_s16le"
+
+[ingest.frames]
+# THE cost lever of Phase 0 (see VRAG-007). Frames sampled per second of video.
+#
+#   0.2  = one frame every 5 s   — 720 frames from a 1 h video
+#   1.0  = one frame every 1 s   — 3600 frames, 5× the vision spend, for slide decks
+#   0.05 = one frame every 20 s  — cheap, misses any slide shown briefly
+#
+# Start at 0.2 and let a measured number move it, not a hunch.
+fps = 0.2
+
+# Hard ceiling per video, so a long video cannot quietly fill the disk. Video-MME's long
+# bucket runs to ~1 h, so 1200 frames at fps=0.2 covers it with room to spare. If the
+# ceiling ever bites, ingest says so loudly rather than silently truncating coverage.
+max_frames = 1200
+
+# Longest edge of a sampled frame, in pixels. -1 keeps the source size. Height is derived
+# from the aspect ratio. 768 is the short side most hosted vision endpoints downscale to
+# anyway, so anything larger is bytes on the wire for no extra detail.
+width = 768
+
+format = "jpg"
+
+# libjpeg quality scale as ffmpeg spells it: 2 is near-lossless, 31 is worst. 4 is visually
+# clean on slide text, which is what OCR in VRAG-023 has to read.
+jpeg_quality = 4
+
+[sample.synthetic]
+# The clip `make sample` generates for the gate to run on. No video can be committed — the
+# Video-MME terms forbid redistributing the benchmark, and .gitignore blocks *.mp4 — so the
+# fixture is made locally from ffmpeg's own sources. testsrc2 draws a running frame counter,
+# which is what lets you open a sampled frame and check its recorded timestamp by eye.
+#
+# 30 s at fps=0.2 is 6 frames: small enough that the gate is quick, big enough that frame
+# timestamps and the max_frames ceiling are both visible.
+duration_s = 30
+width = 1280
+height = 720
+fps = 25
+tone_hz = 440
+
+[sample.real]
+# `make sample-real VIDEO_ID=…` pulls a corpus video from the url in the manifest, which is
+# what PROVENANCE tells a reproducer to do. Capped at 720p: ingest downsamples frames to 768
+# px anyway, so a 4K pull is bandwidth spent on pixels we throw away.
+max_height = 720

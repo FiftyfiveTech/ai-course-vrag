@@ -1,5 +1,10 @@
-.PHONY: setup doctor corpus corpus-check corpus-pointers test gate demo clean
+.PHONY: setup doctor corpus corpus-check corpus-pointers sample sample-real test gate demo clean
 .DEFAULT_GOAL := help
+
+# The video the demo ingests, and the file the levers are read from. Both overridable:
+#   make demo VIDEO=samples/181_8np5YKYx3sU.mp4
+VIDEO ?= samples/one.mp4
+CONFIG ?= config.toml
 
 help:
 	@echo "make setup   create the venv and install deps (uv)"
@@ -7,9 +12,11 @@ help:
 	@echo "make corpus  re-select the 10-video corpus (streams annotations only)"
 	@echo "make corpus-check  assert the committed manifest reproduces byte-for-byte"
 	@echo "make corpus-pointers  assert all 10 videos still resolve at their source url"
+	@echo "make sample  generate samples/one.mp4 locally (offline; no video is committed)"
+	@echo "make sample-real VIDEO_ID=<id>  fetch one dev corpus video from its recorded url"
 	@echo "make test    unit tests"
 	@echo "make gate    run every phase gate in tests/gates/"
-	@echo "make demo    run the thing end to end"
+	@echo "make demo    ingest VIDEO -> wav + sampled frames + media.json"
 
 setup:
 	@command -v uv >/dev/null || { echo "uv not installed: curl -LsSf https://astral.sh/uv/install.sh | sh"; exit 1; }
@@ -38,9 +45,22 @@ gate:
 	@test -n "$$(ls tests/gates/*.py 2>/dev/null)" || { echo "no gates written yet — see tests/gates/README.md"; exit 1; }
 	uv run pytest tests/gates -q
 
-demo:
-	@echo "not implemented yet. make demo must run the system end to end from a clean clone."
-	@exit 1
+# No video is in git — the licence forbids it — so the fixture is generated, not shipped.
+samples/one.mp4:
+	uv run python -m src.sample --out $@ --config $(CONFIG)
+
+sample: samples/one.mp4
+
+# Pointers, not copies: this fetches one video from the url recorded in the manifest, which
+# is what data/corpus/PROVENANCE.md tells a reproducer to do. Refuses held-out ids.
+sample-real:
+	@test -n "$(VIDEO_ID)" || { echo "usage: make sample-real VIDEO_ID=<video_id from data/corpus/manifest.json, dev split>"; exit 1; }
+	uv run python -m src.sample --real $(VIDEO_ID) --config $(CONFIG)
+
+# VIDEO is a prerequisite so the gate command works from a clean clone: samples/one.mp4 has
+# a rule and gets built; any other path has to already exist.
+demo: $(VIDEO)
+	uv run python -m src.ingest $(VIDEO) --config $(CONFIG)
 
 clean:
 	rm -rf .venv .pytest_cache **/__pycache__
