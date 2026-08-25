@@ -1,4 +1,4 @@
-.PHONY: setup doctor corpus corpus-check corpus-pointers heldout-check sample sample-real test gate demo clean
+.PHONY: setup doctor corpus corpus-check corpus-pointers heldout-check leakage-check sample sample-real test gate demo clean
 .DEFAULT_GOAL := help
 
 # The video the demo ingests, and the file the levers are read from. Both overridable:
@@ -13,6 +13,7 @@ help:
 	@echo "make corpus-check  assert the committed manifest reproduces byte-for-byte"
 	@echo "make corpus-pointers  assert all 10 videos still resolve at their source url"
 	@echo "make heldout-check  validate the sealed Q&A set and re-hash it against README"
+	@echo "make leakage-check  assert evals/dev and evals/heldout share no labels"
 	@echo "make sample  generate samples/one.mp4 locally (offline; no video is committed)"
 	@echo "make sample-real VIDEO_ID=<id>  fetch one dev corpus video from its recorded url"
 	@echo "make test    unit tests"
@@ -44,10 +45,18 @@ corpus-pointers:
 heldout-check:
 	uv run python -m src.evalset
 
+# The blind-labelling seal (VRAG-013). Offline. `make gate` asserts the same thing under
+# pytest; this prints the intersection size on its own, which is what goes on the card.
+leakage-check:
+	uv run python -m src.leakage
+
 test:
 	uv run pytest tests -q --ignore=tests/gates
 
-gate:
+# Leakage first, and it prints its number before anything else runs: tests/gates/README.md
+# says no gate result counts until dev and held-out are known to be disjoint, so a leak has
+# to stop the run rather than show up as one red line among the phase gates.
+gate: leakage-check
 	@test -n "$$(ls tests/gates/*.py 2>/dev/null)" || { echo "no gates written yet — see tests/gates/README.md"; exit 1; }
 	uv run pytest tests/gates -q
 

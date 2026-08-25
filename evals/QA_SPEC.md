@@ -228,5 +228,25 @@ Verdict: **incorrect** — system should have abstained.
 Both directories hold `.jsonl` files: one JSON object per line, each matching the format
 in §1.
 
+**Id namespaces.** §1 says ids are unique and never reused. That has to hold *across* the
+two splits, not only inside one, so the two use different prefixes:
+
+| Split | Ids |
+|---|---|
+| `evals/heldout/` | `q001`, `q002`, … `q020` — sealed, tagged `heldout-v1` |
+| `evals/dev/` | `d001`, `d002`, … |
+
+Without this, both splits would independently number from `q001`, every dev case would
+share an id with a held-out one, and the leakage gate's id check would fire on work that
+leaked nothing. The held-out file is sealed, so dev is the side that carries the `d`
+prefix. Added in VRAG-013, when the gate below was written; the sealed file is unchanged.
+
 The gate (`tests/gates/test_no_leakage.py`) asserts `dev ∩ heldout = ∅` by content hash
-before any gate result counts.
+before any gate result counts. It compares `id`, `question` and `answer_note` — normalised
+for case, whitespace and typographic punctuation, so a copy-paste that changed only
+formatting is still caught. It deliberately does **not** compare `video_id`: the video
+split is public and §6 asks for held-out questions on dev videos. A held-out question
+rewritten from memory in different words hashes differently and is not caught — no digest
+sees through a paraphrase. That one is on review and on not opening the file.
+
+    make leakage-check

@@ -55,15 +55,24 @@ the file rather than trusting this table.
 held-out Q&A labels are the Evaluator's. `tests/gates/test_no_leakage.py` (VRAG-013) enforces
 `evals/dev ∩ evals/heldout = ∅` by content hash before any gate result counts.
 
-## Deliberately missing
+## The blind-labelling seal
 
-Two files are absent because they are Week 0 tasks, not scaffolding:
+`tests/gates/test_no_leakage.py` (VRAG-013) asserts `evals/dev ∩ evals/heldout = ∅` by content
+hash. It runs first in `make gate`, because a recall or accuracy number measured after a held-out
+label reached the dev set is a memorisation score, not a result.
 
-- `tests/gates/test_no_leakage.py` — asserts `evals/dev ∩ evals/heldout = ∅` by content hash
-  (task **0.7**). Until it exists, the blind-labelling rule is unenforced.
-- `src/telemetry.py` — the shared cost/latency logger every model call goes through (task **0.8**).
+| | |
+|---|---|
+| Compared | `id`, `question`, `answer_note` — sha256 of each, normalised for case, whitespace and typographic punctuation |
+| Not compared | `video_id`. The **video** split is public (`data/corpus/manifest.json`) and QA_SPEC §6 asks for held-out questions on dev videos |
+| Not caught | A held-out question rewritten in different words. No digest sees through a paraphrase — that one is on review |
+| Check | `make leakage-check` (prints the intersection size), or `make gate` |
 
-Write them. Do not import them from somewhere else.
+Id namespaces keep the two splits apart: held-out is `q001`…`q020`, dev is `d001`… (QA_SPEC §8).
+Without that both would number from `q001` and the id check would fire on work that leaked nothing.
+
+`evals/dev/` is still empty, so today the check passes **vacuously** and says so in its output. It
+starts meaning something with the first dev case.
 
 ## Rules that live in this repo
 
