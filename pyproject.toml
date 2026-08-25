@@ -7,6 +7,8 @@ description = "<TRACK> — FiftyFive AI engineering course"
 requires-python = ">=3.11"
 dependencies = [
     "datasets>=2.19",
+    "groq>=0.9",
+    "ollama>=0.3",
 ]
 
 [dependency-groups]

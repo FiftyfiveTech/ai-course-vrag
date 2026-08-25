@@ -84,6 +84,31 @@ Blocked:  nothing
 Next:     VRAG-012 (label + seal 20 held-out Q&A pairs) — spec is in place.
 
 ## 2026-08-25 — Ritika (Evaluator)
+Did:      VRAG-008 — timestamped transcript module. src/transcript.py:
+          transcribe(wav, cfg, meter) dispatches to the arm in config.toml.
+          Groq arm: whisper-large-v3-turbo via Groq SDK, verbose_json segments,
+          cost logged through Meter at $0.04/audio-hour.
+          Ollama arm: same model pulled locally via hf.co/openai/whisper-large-v3-turbo,
+          cost $0.00. Both return list[Segment(t_start, t_end, text)].
+          config.toml: [transcript] arm/model/language levers added.
+          pyproject.toml: groq>=0.9, ollama>=0.3 added.
+          21 tests in tests/test_transcript.py (no real API calls).
+          PR #8 opened (feat/vrag-008 → dev).
+Number:   .venv/bin/pytest tests -q --ignore=tests/gates → 134 passed (was 113, +21)
+Blocked:  nothing. End-to-end test (real Groq call) deferred — needs GROQ_API_KEY
+          wired in environment; unit tests cover all logic paths.
+Next:     VRAG-012 (label + seal 20 held-out Q&A pairs) — QA_SPEC.md is in place.
+
+## 2026-08-25 — Ritika (Evaluator)
+Did:      VRAG-008 end-to-end test with real Groq call on samples/one.mp4.
+Number:   .venv/bin/python -c "from src.transcript import transcribe; ..."
+          → 2 segments, $0.0400/video-hour  29.6×realtime
+          (synthetic video produces "Thank you." — expected; real corpus videos
+          will produce actual transcript text)
+Blocked:  nothing
+Next:     VRAG-012 (label + seal 20 held-out Q&A pairs)
+
+## 2026-08-25 — Ritika (Evaluator)
 Did:      VRAG-012 — sealed the held-out Q&A set. evals/heldout/heldout_v1.jsonl: 20 pairs,
           17 answerable + 3 unanswerable, at least one answerable question per corpus video,
           written against evals/QA_SPEC.md. src/evalset.py turns the spec into a check;
@@ -110,6 +135,10 @@ Number:   `make heldout-check` → 20 pairs — 17 answerable / 3 unanswerable �
           `.venv/Scripts/pytest tests -q --ignore=tests/gates` → 119 passed, 13 skipped
           (was 113 passed; +19 in tests/test_evalset.py, 13 skips are the ffmpeg-dependent
           ingest tests with ffmpeg off PATH in this shell)
+          After merging dev — VRAG-008 landed while this branch was open — the same
+          command gives 140 passed, 13 skipped (119 + VRAG-008's 21), and
+          `make heldout-check` prints the same sha256, so the heldout-v1 tag still
+          describes the file it was cut against.
           Verification cost: 11 whisper windows, 689 audio-seconds, openai/whisper-large-v3-turbo
           on Groq's free tier — $0.00 spent, $0.0077 at the paid rate src/telemetry.py models.
 Blocked:  nothing.
