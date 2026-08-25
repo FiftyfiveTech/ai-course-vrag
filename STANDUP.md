@@ -69,3 +69,16 @@ Blocked:  nothing. uv run exits 120 with no output in this environment — using
           .venv/bin/python and .venv/bin/pytest directly as workaround.
 Next:     VRAG-011 (evals/QA_SPEC.md) — corpus is in place, cost meter is wired;
           Q&A spec is the next Evaluator task.
+
+## 2026-08-25 — Ritika (Evaluator)
+Did:      VRAG-011 — wrote evals/QA_SPEC.md (232 lines). Defines Q&A pair JSON
+          format (id, question, unanswerable, video_id, t_ref, answer_note),
+          correct-citation rule (right video_id AND |t_start − t_ref| ≤ 30 s AND
+          abstain: false), unanswerable definition, abstention scoring, MVP gate
+          formula (≥ 0.70 on 20 pairs), labeling rules for VRAG-012 (17 answerable
+          + 3 unanswerable, spread across videos, no yes/no, t_ref verified by
+          watching), and 5 worked examples covering all verdict cases.
+          PR #7 opened (feat/vrag-011 → dev).
+Number:   none today (spec document, no computed number)
+Blocked:  nothing
+Next:     VRAG-012 (label + seal 20 held-out Q&A pairs) — spec is in place.
