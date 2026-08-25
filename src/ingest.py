@@ -46,6 +46,7 @@ from typing import Any
 
 from src.config import Config, ConfigError
 from src.config import load as load_config
+from src.telemetry import Meter
 
 OUT_ROOT = Path("runs")
 
@@ -373,6 +374,7 @@ def ingest(video: Path, cfg: Config, out_root: Path = OUT_ROOT) -> dict[str, Any
     if not video.is_file():
         raise IngestError(f"{video}: not a file. `make sample` writes samples/one.mp4.")
 
+    meter = Meter()
     started = time.perf_counter()
     out_dir = out_root / video.stem
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -415,6 +417,7 @@ def ingest(video: Path, cfg: Config, out_root: Path = OUT_ROOT) -> dict[str, Any
         "commands": [
             {"stage": s.name, "argv": s.argv, "seconds": round(s.seconds, 3)} for s in stages
         ],
+        "telemetry": meter.summary_line(media["duration_s"], wall_s=total),
     }
 
     manifest = out_dir / "media.json"
@@ -472,6 +475,7 @@ def report(result: dict[str, Any], out=sys.stdout) -> None:
         file=out,
     )
     print(f"\nwrote {result['manifest']}", file=out)
+    print(result["telemetry"], file=out)
 
 
 def main(argv: list[str] | None = None) -> int:
