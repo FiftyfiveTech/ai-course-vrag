@@ -107,3 +107,17 @@ Number:   .venv/bin/python -c "from src.transcript import transcribe; ..."
           will produce actual transcript text)
 Blocked:  nothing
 Next:     VRAG-012 (label + seal 20 held-out Q&A pairs)
+
+## 2026-08-25 — Ritika (Evaluator)
+Did:      VRAG-010 — Phase 0 gate. tests/gates/gate_phase0.py: 9 checks that
+          run the full pipeline end-to-end (ingest + transcript) from a
+          synthetic video. Asserts: media.json, frames, audio.wav, transcript
+          ran without crash, x_realtime > 1.0, $/video-hour computed and
+          printed, ingest telemetry line present. PR #10 opened (frat/vrag-010 → dev).
+Number:   .venv/bin/pytest tests/gates/gate_phase0.py -v -s
+          → frames: 6 × jpg · audio: 0.96 MB · transcript: 2 segment(s)
+            x_realtime: 26.0
+            $0.0400/video-hour  17.7×realtime
+            9 passed in 5.36s
+Blocked:  nothing
+Next:     VRAG-012 (label + seal 20 held-out Q&A pairs)
