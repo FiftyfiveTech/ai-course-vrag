@@ -61,3 +61,19 @@ tone_hz = 440
 # what PROVENANCE tells a reproducer to do. Capped at 720p: ingest downsamples frames to 768
 # px anyway, so a 4K pull is bandwidth spent on pixels we throw away.
 max_height = 720
+
+[transcript]
+# Which transcription arm to use.  "groq" hits the Groq API (GROQ_API_KEY required);
+# "ollama" runs the model locally via Ollama (no API key, but the model must be pulled).
+#
+# Switch between them without touching any Python:
+#   arm = "groq"    →  hosted, fast, free tier (rate-limited)
+#   arm = "ollama"  →  local, no rate limit, requires `ollama pull hf.co/openai/whisper-large-v3-turbo`
+arm = "groq"
+
+# Model, named by its HF repo id. The arm translates this to whatever its API expects.
+model = "openai/whisper-large-v3-turbo"
+
+# Language hint passed to the model.  Omit (set to "") to auto-detect.
+# Explicit "en" is faster on English-only content.
+language = "en"

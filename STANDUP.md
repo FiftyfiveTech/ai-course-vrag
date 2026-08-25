@@ -82,3 +82,28 @@ Did:      VRAG-011 — wrote evals/QA_SPEC.md (232 lines). Defines Q&A pair JSON
 Number:   none today (spec document, no computed number)
 Blocked:  nothing
 Next:     VRAG-012 (label + seal 20 held-out Q&A pairs) — spec is in place.
+
+## 2026-08-25 — Ritika (Evaluator)
+Did:      VRAG-008 — timestamped transcript module. src/transcript.py:
+          transcribe(wav, cfg, meter) dispatches to the arm in config.toml.
+          Groq arm: whisper-large-v3-turbo via Groq SDK, verbose_json segments,
+          cost logged through Meter at $0.04/audio-hour.
+          Ollama arm: same model pulled locally via hf.co/openai/whisper-large-v3-turbo,
+          cost $0.00. Both return list[Segment(t_start, t_end, text)].
+          config.toml: [transcript] arm/model/language levers added.
+          pyproject.toml: groq>=0.9, ollama>=0.3 added.
+          21 tests in tests/test_transcript.py (no real API calls).
+          PR #8 opened (feat/vrag-008 → dev).
+Number:   .venv/bin/pytest tests -q --ignore=tests/gates → 134 passed (was 113, +21)
+Blocked:  nothing. End-to-end test (real Groq call) deferred — needs GROQ_API_KEY
+          wired in environment; unit tests cover all logic paths.
+Next:     VRAG-012 (label + seal 20 held-out Q&A pairs) — QA_SPEC.md is in place.
+
+## 2026-08-25 — Ritika (Evaluator)
+Did:      VRAG-008 end-to-end test with real Groq call on samples/one.mp4.
+Number:   .venv/bin/python -c "from src.transcript import transcribe; ..."
+          → 2 segments, $0.0400/video-hour  29.6×realtime
+          (synthetic video produces "Thank you." — expected; real corpus videos
+          will produce actual transcript text)
+Blocked:  nothing
+Next:     VRAG-012 (label + seal 20 held-out Q&A pairs)
