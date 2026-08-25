@@ -107,3 +107,49 @@ Number:   .venv/bin/python -c "from src.transcript import transcribe; ..."
           will produce actual transcript text)
 Blocked:  nothing
 Next:     VRAG-012 (label + seal 20 held-out Q&A pairs)
+
+## 2026-08-25 — Ritika (Evaluator)
+Did:      VRAG-012 — sealed the held-out Q&A set. evals/heldout/heldout_v1.jsonl: 20 pairs,
+          17 answerable + 3 unanswerable, at least one answerable question per corpus video,
+          written against evals/QA_SPEC.md. src/evalset.py turns the spec into a check;
+          `make heldout-check` prints the counts, the per-video spread and the sha256, and
+          compares that digest to the one recorded in README.md. Tag heldout-v1 pushed at
+          92b2763. PR #11 (feat/vrag-012 → dev).
+          QA_SPEC §6 requires each t_ref to be verified by watching, and the repo holds
+          pointers not media, so all ten videos were fetched from their manifest urls into a
+          scratchpad outside the repo. None of the ten carries a YouTube caption track, so
+          verification was frames-at-1s-intervals for on-screen facts and a whisper
+          transcript of the ±30 s window for spoken ones. answer_note on every pair records
+          what was seen or heard and the seconds it spans.
+          Caught one real bug the same way VRAG-005 caught its frame-timestamp bug — by
+          checking rather than assuming: core.autocrlf=true on our Windows checkouts rewrites
+          LF to CRLF, which changes the file's bytes and so its sha256. The seal would have
+          failed on a fresh clone for a reason with nothing to do with the labels.
+          .gitattributes now pins *.jsonl and data/corpus/manifest.json to LF.
+Number:   `make heldout-check` → 20 pairs — 17 answerable / 3 unanswerable · 10/10 videos
+          covered · sha256 74398cbae0956271962bde9a3b51b89db766da0ae1d65802c1c56a81ab0d1084
+          · README matches · PASS
+          Same command after cloning the branch fresh into a scratchpad → same digest, PASS.
+          Same command with one t_ref edited from 2.0 to 12.0 → FAIL, exit 1, digest
+          e618b124… against the recorded 74398cba…
+          `.venv/Scripts/pytest tests -q --ignore=tests/gates` → 119 passed, 13 skipped
+          (was 113 passed; +19 in tests/test_evalset.py, 13 skips are the ffmpeg-dependent
+          ingest tests with ffmpeg off PATH in this shell)
+          After merging dev — VRAG-008 landed while this branch was open — the same
+          command gives 140 passed, 13 skipped (119 + VRAG-008's 21), and
+          `make heldout-check` prints the same sha256, so the heldout-v1 tag still
+          describes the file it was cut against.
+          Verification cost: 11 whisper windows, 689 audio-seconds, openai/whisper-large-v3-turbo
+          on Groq's free tier — $0.00 spent, $0.0077 at the paid rate src/telemetry.py models.
+Blocked:  nothing.
+          Flagging for the retro, not blocking: 5 of the 17 answerable questions turn on
+          something on screen rather than something said (q001, q002, q010, q012, q014).
+          q002 had to — video 091 has no speech at all. If the index ends up transcript-only,
+          those five are unretrievable however good retrieval is. VRAG-023 (keyframe captions)
+          is the stretch task that closes it, and the call is worth making before VRAG-021,
+          since the gate is scored once.
+          Also noticed: README's "Deliberately missing" section still lists src/telemetry.py
+          as absent. It landed in VRAG-006. Left alone here rather than widen this diff.
+Next:     VRAG-013 (tests/gates/test_no_leakage.py) — the seal exists now, so the dev ∩
+          heldout = ∅ check is what makes the blind-labelling rule enforced rather than
+          agreed.

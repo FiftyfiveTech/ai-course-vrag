@@ -1,0 +1,10 @@
+# VRAG-012: the held-out Q&A set is sealed by the sha256 of its bytes — the digest is
+# recorded in README.md and re-checked by `make heldout-check`. This repo is worked on from
+# Windows, where `core.autocrlf=true` rewrites LF to CRLF on checkout; that changes the bytes
+# and the seal fails on a fresh clone for a reason that has nothing to do with the labels.
+# Pin the eval files to LF everywhere so the digest is the same on every machine.
+*.jsonl text eol=lf
+
+# Same reason, one step removed: `make corpus-check` asserts the manifest reproduces
+# byte-for-byte against the pinned dataset revision (VRAG-004).
+data/corpus/manifest.json text eol=lf
