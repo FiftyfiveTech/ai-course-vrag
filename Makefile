@@ -1,4 +1,4 @@
-.PHONY: setup doctor corpus corpus-check corpus-pointers heldout-check leakage-check sample sample-real test gate gate-phase1 gate-phase2a demo chunks index index-dev probe answer answer-dev clean
+.PHONY: setup doctor corpus corpus-check corpus-pointers heldout-check leakage-check sample sample-real test gate gate-phase1 gate-phase2a demo chunks index index-dev probe answer answer-dev ask clean
 .DEFAULT_GOAL := help
 
 # The video the demo ingests, and the file the levers are read from. Both overridable:
@@ -7,8 +7,13 @@ VIDEO ?= samples/one.mp4
 CONFIG ?= config.toml
 QUESTIONS ?= evals/probe_questions.txt
 
-# The question `make answer` asks. Overridable:  make answer Q="how old was Bernini?"
+# The question `make answer` and `make ask` put to the corpus. Overridable:
+#   make ask Q="how old was Bernini when he met the Pope?"
 Q ?= What two tools does the presenter say you need to make your first paper cut?
+
+# Extra flags for `make ask`. --open also opens the page in a browser; left out of the
+# default so that a supervisor re-running the command gets a path and not a browser tab.
+ASK_FLAGS ?=
 
 help:
 	@echo "make setup   create the venv and install deps (uv)"
@@ -31,6 +36,7 @@ help:
 	@echo "make answer  Q=\"...\"  answer one question with citations, or abstain"
 	@echo "make answer-dev  answer every evals/dev pair; prints the schema-valid tally"
 	@echo "make gate-phase2a  the VRAG-019 gate: schema-valid on all of dev + abstention"
+	@echo "make ask     Q=\"...\"  THE DEMO: answer + a static player that jumps to the citation"
 
 setup:
 	@command -v uv >/dev/null || { echo "uv not installed: curl -LsSf https://astral.sh/uv/install.sh | sh"; exit 1; }
@@ -142,6 +148,20 @@ gate-phase2a: leakage-check
 # tests/gates/README says no gate result counts until dev and held-out are known disjoint.
 gate-phase1: leakage-check
 	uv run pytest tests/gates/gate_phase1.py -v -s
+
+# THE DEMO - VRAG-020. Question in, answer out, and a static HTML page under runs/ask/
+# whose citations seek a player to the second they came from. No server, no build step:
+# the CSS and JS are inline and the page is opened by double-clicking it.
+#
+# Needs what `make answer` needs - the index (`make index-dev`) and, on the groq arm,
+# GROQ_API_KEY. It refuses outright on an empty index rather than answering from nothing:
+# every question would abstain and the demo would look like it works.
+#
+# The player embeds the local video when samples/ has it and falls back to the manifest
+# url with &t= when it does not, because the corpus is pointers and not copies
+# (data/corpus/PROVENANCE.md). Both are a clickable timestamp; only one needs the media.
+ask:
+	uv run python -m src.ask "$(Q)" --config $(CONFIG) $(ASK_FLAGS)
 
 clean:
 	rm -rf .venv .pytest_cache **/__pycache__ .devids

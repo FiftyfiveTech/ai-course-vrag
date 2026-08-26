@@ -21,7 +21,7 @@ other person as a collaborator with push access.
 | `src/` | The system. Small modules, one job each. |
 | `config.toml` | Every cost or quality lever — frame sampling rate, audio target, sample spec. Read only by `src/config.py`, which refuses to default a missing lever. |
 | `samples/` | Sample videos, **generated or fetched, never committed**. `make sample` writes a synthetic clip; `make sample-real VIDEO_ID=…` pulls one dev video from its manifest url. |
-| `runs/` | Ingest output, one directory per video: `audio.wav`, `frames/`, `media.json`. Gitignored. |
+| `runs/` | Ingest output, one directory per video: `audio.wav`, `frames/`, `media.json`; and `runs/ask/`, the demo pages `make ask` writes. Gitignored. |
 | `data/corpus/` | The 10-video pilot corpus: **pointers only**, never media. `manifest.json` + `PROVENANCE.md` (licence, provenance, how the split was chosen). |
 | `prompts/` | Versioned prompt files. `answer_v1.md` is the Phase 2 answering prompt; its `## System` / `## User` sections are the messages, the rest is commentary. Never inline a prompt in code. |
 | `schemas/` | Pydantic models. `answer.py` is the `{answer, citations[], abstain}` contract — one declaration, used both to constrain generation and to validate the reply. |
@@ -387,6 +387,76 @@ only the larger model gets the *coherence* right.
 
 15 hosted calls and 15 local embeddings, ~1.5 min, **$0.00** on the free tier — two orders of
 magnitude slower than the other gates in that directory.
+
+## The demo: `make ask`
+
+VRAG-020. A question in, an answer out, and every citation is a link that opens the video at
+the second it came from.
+
+```bash
+make index-dev                                        # once — builds the index
+make ask Q="How old was Bernini when he first met the Pope?"
+```
+
+```
+Q: How old was Bernini when he first met the Pope?
+
+   A: He was eight years old.
+
+   [1] video 611 · 0:21–0:47
+       play  file:///…/runs/ask/ae7aa48d-how-old-was-bernini-when-he-first-met-the-pope.html#c1
+       file  samples/611_H8fGd3fCJbg.mp4
+       source  https://www.youtube.com/watch?v=H8fGd3fCJbg&t=16s
+       "At the age of eight, Gian Lorenzo Bernini, the child prodigy, was presented to the
+        Pope, who prophetically announced that the child would be the Michelangelo of"
+
+player: runs/ask/ae7aa48d-how-old-was-bernini-when-he-first-met-the-pope.html
+2 model call(s), 1.00s, $0.0000  (answer.arm=groq openai/gpt-oss-120b)
+```
+
+Add `ASK_FLAGS=--open` to open the page in a browser as well. The page is one file with the
+CSS and the JS inline — no server, no build step, no network — so it opens by
+double-clicking it. Clicking a citation seeks the player to the cited moment and pauses it
+again at the end of the cited window; `…#c1` in the address bar does the same on load, which
+is what makes the url printed above a *timestamp* and not just a link to a page.
+
+`src/ask.py` decides nothing. `src/answer.py` has already retrieved, generated against
+`schemas/answer.py` and grounded every citation onto a passage that was really retrieved; the
+demo renders that. A bug in the answer belongs to VRAG-019, a bug in the link belongs here.
+
+### Pointers, not copies — and the player has to survive that
+
+No video is in this repo and none can be: Video-MME's terms forbid redistributing it,
+`.gitignore` blocks `samples/`, and `data/corpus/manifest.json` holds urls. So there are two
+players, and which one you get depends on what is on the machine:
+
+| On disk | What the page renders |
+|---|---|
+| `samples/611_….mp4` exists | `<video src="../../samples/611_….mp4#t=16.0">`, and citations seek it in place |
+| nothing fetched | a link to the manifest url with `&t=16s`, which opens the original upload at the same second |
+
+The second is not a degraded mode. The citation is a `(video_id, t_start)` pair either way,
+and the deep link resolves it against the only copy this project is allowed to point at. What
+the page never renders is a control that *looks* clickable and is not — a `video_id` with
+neither a local file nor a manifest url gets plain text saying so.
+
+Two details in there were bugs waiting to happen and are pinned by tests:
+
+- **YouTube ignores a fractional `t`.** `t=15.7s` opens the video at 0, which looks exactly
+  like a broken citation. The seek time is floored to whole seconds, never rounded — rounding
+  up can land after the first word of the sentence being cited.
+- **A backslash in an `href` is an escape, not a separator.** `relative_src` builds the
+  `<video src>` with `os.path.relpath` and posix separators, so the page survives the
+  checkout being moved and works when it is written on Windows.
+
+### `ask.pad_s`
+
+The player is seeked to `t_start - ask.pad_s` (5.0 s), not to `t_start`. A citation names a
+*chunk* boundary and a chunk boundary is a grid line on the video clock (see `[chunk]`), not
+where the sentence begins — landing exactly on it drops the viewer mid-word about as often as
+not, and the demo then reads as an off-by-a-second citation when the citation is right. It is
+a viewing lever only: nothing measured reads it, and 5.0 s is well inside the ±30 s tolerance
+QA_SPEC §2 scores the citation on.
 
 ## Rules that live in this repo
 
