@@ -257,3 +257,30 @@ max_tokens = 1200
 # inside the window the citation is scored on. It is a viewing lever only: nothing measured
 # reads it, and the numbers on the card are unaffected by changing it.
 pad_s = 5.0
+
+[api]
+# The HTTP API — read by src/api.py. `make api` serves the same pipeline `make ask` runs, so
+# a frontend can reach it; nothing here changes an answer, only who is allowed to ask for one
+# and what a citation's url points at.
+
+# Where the server binds. 127.0.0.1 and not 0.0.0.0 on purpose: with serve_media = true this
+# process range-serves corpus video off this disk, and Video-MME's terms forbid
+# redistributing it (data/corpus/PROVENANCE.md). Binding to a loopback address means
+# "serving" it reaches this machine and no other. Overridable per run — `make api
+# HOST=0.0.0.0` — which is a decision about the licence and not about convenience.
+host = "127.0.0.1"
+port = 8000
+
+# Browser origins allowed to call this API, exact and enumerated. Not "*": a wildcard on a
+# server that streams corpus media lets any page in any tab read it, and the whole use case
+# is one frontend on one known port. An empty list installs no CORS middleware at all, which
+# is right for curl and for a frontend served by this same origin, and blocks a browser app
+# on another port — the symptom is a CORS error in the console, and the fix is this line.
+cors_origins = ["http://localhost:3000", "http://127.0.0.1:3000", "http://localhost:5173", "http://127.0.0.1:5173"]
+
+# Whether GET /media/{video_id} serves the media files `make sample-real` fetched into
+# samples/. true is what makes an in-page player possible, because a browser cannot follow
+# the file:// path the static demo page uses. Set it false on any host that is not this
+# laptop: a citation still carries source_url, which opens the original upload at the same
+# second and is the only copy this project may point at.
+serve_media = true

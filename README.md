@@ -24,7 +24,7 @@ other person as a collaborator with push access.
 | `runs/` | Ingest output, one directory per video: `audio.wav`, `frames/`, `media.json`; and `runs/ask/`, the demo pages `make ask` writes. Gitignored. |
 | `data/corpus/` | The 10-video pilot corpus: **pointers only**, never media. `manifest.json` + `PROVENANCE.md` (licence, provenance, how the split was chosen). |
 | `prompts/` | Versioned prompt files. `answer_v1.md` is the Phase 2 answering prompt; its `## System` / `## User` sections are the messages, the rest is commentary. Never inline a prompt in code. |
-| `schemas/` | Pydantic models. `answer.py` is the `{answer, citations[], abstain}` contract — one declaration, used both to constrain generation and to validate the reply. |
+| `schemas/` | Pydantic models. `answer.py` is the `{answer, citations[], abstain}` contract — one declaration, used both to constrain generation and to validate the reply. `api.py` is the HTTP contract `make api` serves and `/docs` renders. |
 | `evals/dev/` | **Builder** tunes here. 15 cases (`dev_v1.jsonl`): 12 answerable, 3 not. Written from the transcripts, not from watching — see [evals/dev/README.md](evals/dev/README.md) before quoting a number from them. |
 | `evals/heldout/` | **Evaluator** only. Sealed Wednesday, tagged `heldout-v1`. The Builder never reads it. |
 | `evals/QA_SPEC.md` | What a correct citation is (±30 s), what counts as unanswerable, how the gate scores. |
@@ -457,6 +457,142 @@ where the sentence begins — landing exactly on it drops the viewer mid-word ab
 not, and the demo then reads as an off-by-a-second citation when the citation is right. It is
 a viewing lever only: nothing measured reads it, and 5.0 s is well inside the ±30 s tolerance
 QA_SPEC §2 scores the citation on.
+
+## The same demo over HTTP: `make api`
+
+`make ask` writes a file you open by double-clicking it, which is the right demo for a
+supervisor re-running a gate command and the wrong one for a frontend: there is no page to
+open, the media reference is a `file://` path a browser will not follow from an app served
+over HTTP, and nothing can be retried. `make api` puts the same pipeline behind four
+endpoints and changes none of it.
+
+```bash
+make index-dev            # once — the API refuses to answer from an empty index
+make api                  # http://127.0.0.1:8000, interactive schema at /docs
+make api PORT=9000        # HOST= and PORT= override the [api] levers per run
+make openapi > openapi.json   # the contract as a file; no server, no network
+```
+
+```
+VRAG API on http://127.0.0.1:8000  (docs at /docs)
+  index   546 chunk(s) over 5 video(s) in 'vrag'
+  answer  groq · openai/gpt-oss-120b
+  media   served from samples/
+  cors    ['http://localhost:3000', 'http://127.0.0.1:3000', 'http://localhost:5173', 'http://127.0.0.1:5173']
+```
+
+| Endpoint | Answers |
+|---|---|
+| `GET /health` | Is there an index, which arm, which config bytes. What a frontend asks *before* it shows a question box — an empty index does not fail, it makes every question abstain, and a UI that looks like it works while answering nothing is the failure mode worth catching here. |
+| `POST /ask` | `{"question": "…"}` → the answer, its citations, the grounding repairs, the spend and the provenance. |
+| `GET /videos` | The union of the manifest and the index: which videos can be cited, which are only pointers, and where each can be watched. |
+| `GET /media/{video_id}` | The media file on this host, **range-served** — `206` + `Content-Range`, which is what a seeking `<video>` element actually asks for. |
+
+```bash
+curl -s localhost:8000/ask -H 'content-type: application/json' \
+  -d '{"question": "What two tools does the presenter say you need to make your first paper cut?"}'
+```
+
+```json
+{
+  "question": "What two tools does the presenter say you need to make your first paper cut?",
+  "answer": "You need a self-healing cutting mat and a scalpel.",
+  "abstain": false,
+  "schema_valid": true,
+  "error": null,
+  "citations": [
+    {
+      "n": 1,
+      "video_id": "521",
+      "t_start": 13.8,
+      "t_end": 42.74,
+      "seek_s": 8.8,
+      "label": "video 521 · 0:13–0:42",
+      "passage": "… In order to create a first paper cut there's going to be two tools that you need. First of all you're going to need a self-healing cutting mat and the second thing is a scalpel. …",
+      "stream_url": "/media/521",
+      "source_url": "https://www.youtube.com/watch?v=qJGqZ_g__So&t=8s"
+    }
+  ],
+  "repairs": [],
+  "spend": { "calls": 2, "latency_s": 17.762, "cost_usd": 0.0 },
+  "provenance": {
+    "arm": "ollama",
+    "answer_model": "bartowski/Llama-3.2-3B-Instruct-GGUF:Q4_K_M",
+    "embed_model": "nomic-ai/nomic-embed-text-v1.5-GGUF:F16",
+    "top_k": 5, "retrieved": 5,
+    "prompt": "prompts/answer_v1.md",
+    "prompt_sha256": "f31f34caf6d695073c99f9b5d77cb483104eb9d6f7e93e16634e0c114cdd86e0",
+    "config": "config.toml",
+    "config_sha256": "…"
+  }
+}
+```
+
+That response is real output, and it is the **local arm** because the hosted arm's free tier
+was out of tokens for the day when it was captured (see the 429 note below); the `provenance`
+block is there precisely so a pasted response says which arm produced it. One citation of the
+four is shown and its passage is elided; nothing else is edited.
+
+### Three outcomes, and none of them is a 5xx
+
+An abstention is a correct answer under QA_SPEC §4, so it comes back `200` with
+`abstain: true` and no citations. A model reply that did not validate comes back `200` with
+`schema_valid: false` and the reason in `error` — that is the number VRAG-019 is measured on
+and it must not be hidden behind a status code, and a client cannot fix it by retrying. The
+failures that *are* status codes are the ones an operator can act on:
+
+| Status | Means | Hint in the body |
+|---|---|---|
+| `422` | Malformed request — blank question, or an unknown field | which field |
+| `429` | The hosted free tier's daily token budget is spent. Carries `Retry-After`. | wait, or run `answer.arm = "ollama"` |
+| `503` | No index, no embedding server, or no API key | `make index-dev`, `ollama serve`, `make doctor` |
+
+The `429` is not hypothetical — it is what the first live call through this API returned
+(`tokens per day (TPD): Limit 200000, Used 198971`). A daily cap is a *wait*, not a fault, so
+it gets the one status code that means that, plus the wait the provider states, instead of
+being flattened into a `503` a frontend retries forever.
+
+Every refusal has the same body — `{"error": …, "hint": …}`. FastAPI's default `detail` is
+sometimes a string and sometimes a list of validation errors, and a client should not have to
+type-switch on it.
+
+### Levers are not request parameters
+
+`/ask` takes a question and nothing else: `AskRequest` forbids extra fields, so a client that
+sends `top_k` or `temperature` gets a `422` saying so rather than watching the field be
+ignored. Retrieval depth, the model, the prompt and the temperature live in `config.toml` and
+only there, which is what makes an answer attributable — and `provenance` hands back the
+sha256 of the exact config bytes and prompt file behind the response, so any answer can be
+re-run. Per-request overrides would make two answers from the same server incomparable with
+no record of why.
+
+### Playing a citation over HTTP, and the licence
+
+`make ask` gets to write `<video src="../../samples/611_….mp4#t=16.0">`. An API cannot: a
+browser will not follow a `file://` path from a page served over HTTP. So each citation
+carries up to two urls, and `GET /media/{video_id}` is what makes the first one work.
+
+| `api.serve_media` | `stream_url` | What a frontend does |
+|---|---|---|
+| `true`, file fetched | `/media/521` | `<video src="/media/521">`, seeked to `seek_s` |
+| `true`, never fetched | `null` | fall back to `source_url` — the original upload at the same second |
+| `false` | `null` (always) | `source_url` only; `/media/…` answers `403` |
+
+Range serving is the whole point of that endpoint and not FastAPI boilerplate. A `<video>`
+seeking to 7:12 issues `Range: bytes=…` and needs a `206` with a `Content-Range` back; a
+handler that returned the file whole would *appear* to work — the video plays from 0:00 — and
+every citation would silently seek to nothing. There is a test for the `206`, one for the
+`416` past the end, and one for `Content-Disposition: inline`, because `FileResponse`'s
+`filename=` on its own sends `attachment` and then opening the url downloads 98 MB of video
+instead of playing it.
+
+The defaults are the licence and not caution. `data/corpus/PROVENANCE.md`: the corpus is
+pointers, not copies, and Video-MME's terms forbid redistributing the media. So
+`api.host = "127.0.0.1"` — this process range-serves corpus video off this disk, and a
+loopback bind means "serving" it reaches this machine and no other — and `api.cors_origins` is
+an enumerated list rather than `*`, because a wildcard on a server that streams that media
+lets any page in any tab read it. `make api HOST=0.0.0.0` is available, and it is a decision
+about the licence rather than about convenience.
 
 ## Rules that live in this repo
 
