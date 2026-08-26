@@ -216,6 +216,64 @@ def test_grounding_leaves_an_abstention_untouched():
 # --------------------------------------------------------------------- the arms
 
 
+# ---------------------------------------------------------------------------
+# Which model is reported — effective_model()
+# ---------------------------------------------------------------------------
+#
+# answer.model is the hosted id and answer.ollama_model the GGUF one. They are two different
+# models with two different measured numbers (README: 15/15 vs 12/15 schema-valid on dev), so
+# reporting the first while running the second labels a run with a number that was never
+# measured on it. That is not cosmetic in a repo whose rule is that a number travels with the
+# command that produced it, and it is what these three pin.
+
+_ARMS = (
+    '[answer]\narm = "{arm}"\nmodel = "openai/gpt-oss-120b"\n'
+    'ollama_model = "bartowski/Llama-3.2-3B-Instruct-GGUF:Q4_K_M"\n'
+    'prompt = "p"\ntemperature = 0.0\nmax_tokens = 10\n'
+)
+_LOCAL = "bartowski/Llama-3.2-3B-Instruct-GGUF:Q4_K_M"
+
+
+def test_the_reported_model_follows_the_arm(tmp_path):
+    other = tmp_path / "b"
+    other.mkdir()
+    hosted = cfg_from(_ARMS.format(arm="groq"), tmp_path)
+    local = cfg_from(_ARMS.format(arm="ollama"), other)
+    assert mod.effective_model(hosted) == "openai/gpt-oss-120b"
+    assert mod.effective_model(local) == _LOCAL
+
+
+def test_the_local_arm_reports_the_model_that_actually_answered(tmp_path, monkeypatch):
+    """The bug this exists for: the local arm reported the Groq id it never called."""
+    cfg = cfg_from(_ARMS.format(arm="ollama"), tmp_path)
+    seen = {}
+
+    def fake_ollama(system, user, model, temperature, max_tokens, meter):
+        seen["model"] = model
+        return "{}", 3
+
+    monkeypatch.setattr(mod, "_ollama_arm", fake_ollama)
+    _, _, used = mod._ask("s", "u", cfg, Meter())
+
+    assert seen["model"] == _LOCAL
+    assert used == seen["model"], "reported an arm it did not call"
+
+
+def test_a_rate_limit_fallback_reports_the_model_that_answered(tmp_path, monkeypatch):
+    """The hosted arm plus a 429 runs locally. Naming gpt-oss-120b there would describe a
+    call that never completed, and the two models do not score the same."""
+    cfg = cfg_from(_ARMS.format(arm="groq"), tmp_path)
+
+    def boom(*a, **k):
+        raise mod._GroqRateLimitError("groq rate limit (openai/gpt-oss-120b): 429")
+
+    monkeypatch.setattr(mod, "_groq_arm", boom)
+    monkeypatch.setattr(mod, "_ollama_arm", lambda *a, **k: ("{}", 3))
+    _, _, used = mod._ask("s", "u", cfg, Meter())
+
+    assert used == _LOCAL
+
+
 def test_the_groq_wire_name_is_the_hf_repo_id_unchanged():
     """Unlike whisper's. Asserted so a future 'helpful' .split('/') has to break a test."""
     assert mod._groq_wire_name("openai/gpt-oss-120b") == "openai/gpt-oss-120b"
@@ -330,7 +388,9 @@ def wired(monkeypatch, tmp_path):
     state = {"hits": [chunk()], "reply": "{}"}
 
     monkeypatch.setattr(mod, "retrieve", lambda q, c, m: state["hits"])
-    monkeypatch.setattr(mod, "_ask", lambda s, u, c, m: (state["reply"], 7))
+    monkeypatch.setattr(
+        mod, "_ask", lambda s, u, c, m: (state["reply"], 7, "openai/gpt-oss-120b")
+    )
     return cfg, state
 
 

@@ -83,6 +83,12 @@ class AnswerRun:
     repairs: list[str] = field(default_factory=list)
     tokens: int = 0
 
+    # The model that actually produced `raw`, as an HF repo id. Not read off config at
+    # report time, because config says which arm was *asked* and this says which one
+    # *answered* — they differ whenever the groq arm hits a 429 and falls back to the
+    # local one mid-call. Empty only for an AnswerRun built by a test fake.
+    model: str = ""
+
     @property
     def valid(self) -> bool:
         return self.answer is not None
@@ -108,7 +114,7 @@ def answer(question: str, cfg: Config, meter: Meter) -> AnswerRun:
     hits = retrieve(question, cfg, meter)
     system, user = build_messages(question, hits, cfg)
 
-    raw, tokens = _ask(system, user, cfg, meter)
+    raw, tokens, used = _ask(system, user, cfg, meter)
 
     try:
         parsed = Answer.model_validate_json(raw)
@@ -120,6 +126,7 @@ def answer(question: str, cfg: Config, meter: Meter) -> AnswerRun:
             answer=None,
             error=_terse(exc),
             tokens=tokens,
+            model=used,
         )
     except ValueError as exc:
         # Not JSON at all. Same class of result as a validation failure: countable, not fatal.
@@ -130,6 +137,7 @@ def answer(question: str, cfg: Config, meter: Meter) -> AnswerRun:
             answer=None,
             error=f"not valid JSON: {exc}",
             tokens=tokens,
+            model=used,
         )
 
     grounded, repairs = ground(parsed, hits)
@@ -140,6 +148,7 @@ def answer(question: str, cfg: Config, meter: Meter) -> AnswerRun:
         answer=grounded,
         repairs=repairs,
         tokens=tokens,
+        model=used,
     )
 
 
@@ -270,26 +279,56 @@ def ground(ans: Answer, hits: list[RetrievedChunk]) -> tuple[Answer, list[str]]:
 # ---------------------------------------------------------------------------
 
 
-def _ask(system: str, user: str, cfg: Config, meter: Meter) -> tuple[str, int]:
-    """Route to the configured arm. Returns the raw reply text and the tokens it cost."""
+def effective_model(cfg: Config) -> str:
+    """The HF repo id the configured arm will actually run.
+
+    `answer.model` is the hosted id and `answer.ollama_model` the GGUF one; they are two
+    different models with two different measured numbers (see the table in the README), so
+    reporting the first while running the second is not a cosmetic slip — it labels a run
+    with a number that was never measured on it. Every place that prints or serves the
+    answer model goes through here rather than reading `answer.model` directly.
+
+    This is what the arm is *configured* to run. What actually ran is `AnswerRun.model`,
+    which differs on a 429 fallback.
+    """
+    arm = str(cfg.get("answer.arm")).strip().lower()
+    if arm == "ollama":
+        return str(cfg.get("answer.ollama_model"))
+    return str(cfg.get("answer.model"))
+
+
+def _ask(system: str, user: str, cfg: Config, meter: Meter) -> tuple[str, int, str]:
+    """Route to the configured arm.
+
+    Returns the raw reply text, the tokens it cost, and the HF repo id of the model that
+    produced it — the third is not always the configured one, because the groq arm falls
+    back to the local model on a 429.
+    """
     arm = str(cfg.get("answer.arm")).strip().lower()
     model = cfg.get("answer.model")
     temperature = float(cfg.get("answer.temperature"))
     max_tokens = int(cfg.get("answer.max_tokens"))
 
     if arm == "groq":
-        ollama_model = cfg.get("answer.ollama_model")
+        ollama_model = str(cfg.get("answer.ollama_model"))
         try:
-            return _groq_arm(system, user, model, temperature, max_tokens, meter)
-        except _GroqRateLimitError as exc:
+            text, tokens = _groq_arm(system, user, model, temperature, max_tokens, meter)
+            return text, tokens, str(model)
+        except _GroqRateLimitError:
             print(
                 f"WARNING: Groq rate limit hit — falling back to ollama ({ollama_model})",
-                file=__import__("sys").stderr,
+                file=sys.stderr,
             )
-            return _ollama_arm(system, user, ollama_model, temperature, max_tokens, meter)
+            text, tokens = _ollama_arm(
+                system, user, ollama_model, temperature, max_tokens, meter
+            )
+            return text, tokens, ollama_model
     if arm == "ollama":
-        ollama_model = cfg.get("answer.ollama_model")
-        return _ollama_arm(system, user, ollama_model, temperature, max_tokens, meter)
+        ollama_model = str(cfg.get("answer.ollama_model"))
+        text, tokens = _ollama_arm(
+            system, user, ollama_model, temperature, max_tokens, meter
+        )
+        return text, tokens, ollama_model
     raise AnswerError(
         f"config.toml: answer.arm is {arm!r}, which is not an arm. Use 'groq' or 'ollama'."
     )
@@ -530,8 +569,9 @@ def main(argv: list[str] | None = None) -> int:
                 runs.append((pair, run))
             _dev_summary(runs, cfg, meter)
         else:
-            report(answer(" ".join(args.question), cfg, meter))
-            _spend(cfg, meter)
+            run = answer(" ".join(args.question), cfg, meter)
+            report(run)
+            _spend(cfg, meter, run.model)
     except Exception as exc:
         print(f"FAIL - {exc}", file=sys.stderr)
         return 1
@@ -558,12 +598,15 @@ def _dev_summary(runs: list[tuple[dict, AnswerRun]], cfg: Config, meter: Meter) 
     print("No accuracy here by design - QA_SPEC section 5 is scored on evals/heldout (VRAG-021).")
 
 
-def _spend(cfg: Config, meter: Meter) -> None:
+def _spend(cfg: Config, meter: Meter, used: str = "") -> None:
+    # `used` is the model that actually answered, which the caller can name only when there
+    # was a single run. The dev sweep has fifteen, so it falls back to the model the
+    # configured arm runs — the same string unless a 429 sent one of them elsewhere.
     calls = meter._calls
     print(
         f"\n{len(calls)} model call(s), {sum(c.latency_s for c in calls):.2f}s, "
         f"${sum(c.cost_usd for c in calls):.4f}  "
-        f"(answer.arm={cfg.get('answer.arm')} {cfg.get('answer.model')})"
+        f"(answer.arm={cfg.get('answer.arm')} {used or effective_model(cfg)})"
     )
 
 
