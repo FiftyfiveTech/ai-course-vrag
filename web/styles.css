@@ -1,0 +1,593 @@
+/* VRAG frontend — one stylesheet, no framework.
+ *
+ * Two things here are load-bearing rather than taste:
+ *
+ *   --brand is the only brand colour in the file. Everything tinted is derived from it or
+ *   from --brand-soft, so swapping the hex is the whole rebrand. It is set to the 55 red;
+ *   if the exact corporate hex differs, this line is the one to change.
+ *
+ *   Every animation is inside @media (prefers-reduced-motion: no-preference), so the bubble
+ *   pop and the word-by-word reveal are opt-out at the OS level. The reveal in particular
+ *   animates opacity only — the words are in the DOM and readable from the first frame, so
+ *   a reader who never gets the animation is never waiting on it.
+ */
+
+:root {
+  --brand: #e2402c;
+  --brand-ink: #ffffff;
+  --brand-soft: color-mix(in srgb, var(--brand) 12%, transparent);
+
+  --bg: #fbfbfa;
+  --panel: #ffffff;
+  --ink: #17171a;
+  --ink-2: #5a5a63;
+  --ink-3: #8b8b95;
+  --line: #e7e7e4;
+  --line-2: #f1f1ee;
+  --ok: #1a9c62;
+  --warn: #c98a00;
+
+  --radius: 14px;
+  --radius-lg: 20px;
+  --shadow: 0 1px 2px rgba(20, 20, 25, .05), 0 8px 24px -12px rgba(20, 20, 25, .14);
+  --font: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Inter, Roboto, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "Cascadia Mono", Menlo, Consolas, monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0e0e11;
+    --panel: #17171b;
+    --ink: #f2f2f0;
+    --ink-2: #a6a6b0;
+    --ink-3: #71717c;
+    --line: #26262c;
+    --line-2: #1e1e23;
+    --ok: #3ecf8e;
+    --warn: #e0aa2e;
+    --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 12px 32px -16px rgba(0, 0, 0, .7);
+  }
+}
+
+* { box-sizing: border-box; }
+
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font);
+  font-size: 16px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ---------------------------------------------------------------- topbar */
+
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 24px;
+  background: color-mix(in srgb, var(--bg) 82%, transparent);
+  backdrop-filter: saturate(180%) blur(12px);
+  border-bottom: 1px solid var(--line);
+}
+
+.brand { display: flex; align-items: center; gap: 12px; }
+
+/* The 55 mark. Drawn in CSS rather than shipped as an asset: there is no logo file in this
+   repo and inventing one as a binary would be worse than a wordmark that is obviously type. */
+.mark {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  background: var(--brand);
+  color: var(--brand-ink);
+  font-weight: 800;
+  font-size: 15px;
+  letter-spacing: -.06em;
+  line-height: 1;
+}
+
+.brandtext { display: flex; align-items: baseline; gap: 9px; }
+.org { font-weight: 650; letter-spacing: -.02em; }
+.product {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  padding-left: 9px;
+  border-left: 1px solid var(--line);
+}
+
+.topbar-right { display: flex; align-items: center; gap: 8px; }
+
+.status {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel);
+  color: var(--ink-2);
+  font: inherit;
+  font-size: 13px;
+  cursor: default;
+}
+.status .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ink-3);
+  flex: none;
+}
+.status[data-state="ready"] .dot { background: var(--ok); }
+.status[data-state="empty"] .dot,
+.status[data-state="down"] .dot { background: var(--warn); }
+
+.ghost {
+  padding: 6px 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--ink-2);
+  font-size: 13px;
+  text-decoration: none;
+}
+.ghost:hover { color: var(--ink); border-color: var(--ink-3); }
+
+/* ------------------------------------------------------------------ main */
+
+main {
+  flex: 1;
+  width: 100%;
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 0 20px 200px;
+}
+
+.hero { padding: 72px 0 36px; }
+.hero h1 {
+  margin: 0 0 10px;
+  font-size: clamp(30px, 6vw, 44px);
+  line-height: 1.1;
+  letter-spacing: -.035em;
+  font-weight: 700;
+}
+.hero .sub { margin: 0; color: var(--ink-2); max-width: 52ch; }
+.hero.gone { display: none; }
+
+/* --------------------------------------------------------------- thread */
+
+.thread { display: flex; flex-direction: column; gap: 40px; }
+.turn {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  /* Clearance for the sticky header, so scrolling a turn to the top of the viewport does not
+     slide the question bubble under the bar. */
+  scroll-margin-top: 84px;
+}
+
+/* The question, right-aligned, so the eye has a left edge for answers only. */
+.bubble-q {
+  align-self: flex-end;
+  max-width: 85%;
+  padding: 11px 16px;
+  border-radius: var(--radius-lg) var(--radius-lg) 4px var(--radius-lg);
+  background: var(--brand);
+  color: var(--brand-ink);
+  font-weight: 500;
+}
+
+.bubble-a {
+  align-self: flex-start;
+  max-width: 100%;
+  padding: 18px 20px;
+  border-radius: 4px var(--radius-lg) var(--radius-lg) var(--radius-lg);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  box-shadow: var(--shadow);
+}
+
+/* An abstention is a correct outcome (QA_SPEC §4), so it is styled as a quieter answer and
+   never as an error. A failed schema validation is the one that gets the warning edge. */
+.bubble-a.abstain { color: var(--ink-2); font-style: italic; }
+.bubble-a.broken { border-color: color-mix(in srgb, var(--warn) 50%, var(--line)); }
+.bubble-a.error { border-color: color-mix(in srgb, var(--brand) 45%, var(--line)); }
+
+.bubble-a .why {
+  margin: 10px 0 0;
+  font-size: 13px;
+  font-style: normal;
+  color: var(--ink-3);
+}
+.bubble-a .why code { font-family: var(--mono); font-size: 12px; }
+
+/* The bubbly bit: the bubble pops, then the words fade in a few at a time. */
+@media (prefers-reduced-motion: no-preference) {
+  .bubble-q, .bubble-a { animation: pop .34s cubic-bezier(.22, 1.2, .4, 1) both; }
+  .w { animation: rise .38s ease both; animation-delay: var(--d, 0s); }
+  .thinking .d1 { animation: bob 1.1s ease-in-out infinite; }
+  .thinking .d2 { animation: bob 1.1s ease-in-out .16s infinite; }
+  .thinking .d3 { animation: bob 1.1s ease-in-out .32s infinite; }
+}
+
+@keyframes pop {
+  from { opacity: 0; transform: translateY(10px) scale(.965); }
+  to   { opacity: 1; transform: none; }
+}
+@keyframes rise {
+  from { opacity: 0; transform: translateY(.22em); filter: blur(3px); }
+  to   { opacity: 1; transform: none; filter: none; }
+}
+@keyframes bob {
+  0%, 80%, 100% { transform: translateY(0); opacity: .45; }
+  40%           { transform: translateY(-5px); opacity: 1; }
+}
+
+/* Three dots while the request is in flight. Answering makes an embed call and a hosted
+   completion and takes seconds — the wait is real and this is what says so. */
+.thinking { display: inline-flex; align-items: center; gap: 6px; padding: 4px 2px; }
+.thinking span {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--brand);
+  opacity: .45;
+}
+
+/* ------------------------------------------------------------ citations */
+
+/* Cards, and they are meant to read as separate cards. The first version used an 8px gap and
+   a 1px border, and three citations off one video looked like one striped block — which is
+   the opposite of the thing being communicated, since each is a distinct claim about a
+   distinct span of tape. Hence the wider gap, the raised surface and the number sitting in
+   its own gutter outside the card body. */
+.cites {
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 14px;
+  counter-reset: none;
+}
+
+.cite-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 6px 0 0;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+/* A rule running off the label, so the citation block reads as its own section of the turn. */
+.cite-head::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: linear-gradient(to right, var(--line), transparent);
+}
+
+.cite {
+  position: relative;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 10px 14px;
+  width: 100%;
+  padding: 14px 16px 15px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+  box-shadow: 0 1px 2px rgba(20, 20, 25, .04);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  text-decoration: none;
+  cursor: pointer;
+  overflow: hidden;
+  transition: border-color .18s ease, transform .18s ease, box-shadow .18s ease;
+}
+
+/* The accent rail. Width, not colour, is what changes on activation — a card that only
+   changed its fill would move the whole list's colour weight around as you click through it,
+   and the rail marks one card without restyling the rest. */
+.cite::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: var(--brand);
+  opacity: 0;
+  transition: opacity .18s ease, width .18s ease;
+}
+.cite:hover { border-color: color-mix(in srgb, var(--brand) 40%, var(--line)); transform: translateY(-1px); box-shadow: var(--shadow); }
+.cite:hover::before { opacity: .35; }
+.cite.active { border-color: color-mix(in srgb, var(--brand) 60%, var(--line)); box-shadow: var(--shadow); }
+.cite.active::before { opacity: 1; width: 4px; }
+
+/* A citation with nowhere to play it is still a real citation — it just must not look
+   clickable. Rendering it as a dead link would be the one outcome worth avoiding. */
+.cite.dead { cursor: default; opacity: .68; box-shadow: none; }
+.cite.dead:hover { transform: none; border-color: var(--line); box-shadow: none; }
+.cite.dead:hover::before { opacity: 0; }
+
+.cite .n {
+  display: grid;
+  place-items: center;
+  grid-row: span 2;
+  align-self: start;
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  background: var(--brand-soft);
+  color: var(--brand);
+  font-size: 12px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.cite.active .n { background: var(--brand); color: var(--brand-ink); }
+
+/* The head row: where · when · what clicking does. */
+.cite-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+
+.vid {
+  font-size: 13px;
+  font-weight: 650;
+  letter-spacing: -.01em;
+  color: var(--ink);
+  white-space: nowrap;
+}
+
+/* ------------------------------------------------------------- timestamp */
+
+/* The coordinates. Its own pill, monospaced and tabular, because this is what a reader scans
+   a list of citations for — and because with proportional digits "0:13" and "1:04" are
+   different widths and a column of them does not line up. */
+/* Neutral by default, brand-tinted only on the active card. Tinting every stamp was the
+   first version and it put three loud red pills in a column: the accent stopped meaning
+   anything, and the one card actually driving the player was distinguished by a 4px rail
+   alone. The pill already separates itself from the prose by being a box in a mono face —
+   it does not need the colour to do that too, so the colour is spent on state instead. */
+.stamp {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 9px 3px 7px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--line-2);
+  color: var(--ink-2);
+  font-family: var(--mono);
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.5;
+  white-space: nowrap;
+  transition: color .18s ease, background .18s ease, border-color .18s ease;
+}
+.stamp .arrow { opacity: .45; font-family: var(--font); }
+.stamp .dur {
+  margin-left: 2px;
+  padding-left: 7px;
+  border-left: 1px solid var(--line);
+  font-size: 11px;
+  opacity: .7;
+}
+.stamp .ico { width: 13px; height: 13px; opacity: .6; flex: none; }
+
+.cite:hover .stamp { border-color: color-mix(in srgb, var(--brand) 30%, var(--line)); color: var(--ink); }
+
+.cite.active .stamp {
+  background: var(--brand-soft);
+  border-color: color-mix(in srgb, var(--brand) 40%, transparent);
+  color: color-mix(in srgb, var(--brand) 80%, var(--ink));
+}
+.cite.active .stamp .dur { border-left-color: color-mix(in srgb, var(--brand) 30%, transparent); }
+.cite.active .stamp .ico { opacity: .85; }
+
+/* What clicking does, pushed to the far right and kept quiet — it is a label on the control,
+   not a second thing to read. */
+.action {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: auto;
+  font-size: 11.5px;
+  color: var(--ink-3);
+  white-space: nowrap;
+}
+.action .ico { width: 13px; height: 13px; flex: none; }
+.cite:hover .action, .cite.active .action { color: var(--brand); }
+.cite.dead .action { font-style: italic; }
+.cite.dead:hover .action { color: var(--ink-3); }
+
+.cite .passage {
+  grid-column: 2;
+  margin: 0;
+  padding-left: 11px;
+  border-left: 2px solid var(--line-2);
+  font-size: 13.5px;
+  line-height: 1.55;
+  color: var(--ink-2);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.cite.active .passage { border-left-color: color-mix(in srgb, var(--brand) 30%, var(--line)); }
+
+@media (max-width: 560px) {
+  /* The action label is the first thing to go: the icon on the stamp already says playable,
+     and the timestamps must not wrap to keep it. */
+  .action .act-text { display: none; }
+}
+
+/* ---------------------------------------------------------------- player */
+
+.player { margin: 6px 0 0; }
+.player video {
+  width: 100%;
+  /* Capped, and letterboxed rather than cropped. Unconstrained, a portrait or 4:3 source
+     grows to its intrinsic aspect ratio the moment metadata arrives and pushes the
+     provenance line off under the composer — the citation and what produced it are the
+     point of the page, and the player is the evidence for them. */
+  max-height: 46vh;
+  object-fit: contain;
+  border-radius: var(--radius);
+  background: #000;
+  display: block;
+  border: 1px solid var(--line);
+}
+.player figcaption {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.note {
+  margin: 0;
+  padding: 10px 14px;
+  border: 1px dashed var(--line);
+  border-radius: var(--radius);
+  font-size: 13px;
+  color: var(--ink-3);
+}
+
+/* ------------------------------------------------------------ provenance */
+
+.meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 8px;
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--ink-3);
+}
+.meta .chip {
+  padding: 3px 9px;
+  border: 1px solid var(--line-2);
+  border-radius: 999px;
+  background: var(--panel);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.meta .chip b { font-weight: 600; color: var(--ink-2); }
+.meta .chip.mono { font-family: var(--mono); font-size: 11px; }
+.meta .chip.repair { border-color: color-mix(in srgb, var(--warn) 40%, var(--line)); }
+
+/* -------------------------------------------------------------- composer */
+
+.composer {
+  position: fixed;
+  left: 50%;
+  bottom: 0;
+  transform: translateX(-50%);
+  width: min(760px, 100%);
+  padding: 20px;
+  background: linear-gradient(to top, var(--bg) 62%, transparent);
+}
+
+.field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 7px 7px 18px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+  transition: border-color .16s ease, box-shadow .16s ease;
+}
+.field:focus-within {
+  border-color: color-mix(in srgb, var(--brand) 55%, var(--line));
+  box-shadow: var(--shadow), 0 0 0 4px var(--brand-soft);
+}
+
+.field input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  padding: 9px 0;
+}
+.field input::placeholder { color: var(--ink-3); }
+
+#send {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  border: 0;
+  border-radius: 50%;
+  background: var(--brand);
+  color: var(--brand-ink);
+  cursor: pointer;
+  transition: opacity .16s ease, transform .16s ease;
+}
+#send:hover:not(:disabled) { transform: scale(1.06); }
+#send:disabled { opacity: .4; cursor: not-allowed; }
+
+.examples { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.examples button {
+  padding: 5px 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel);
+  color: var(--ink-2);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.examples button:hover { color: var(--ink); border-color: var(--ink-3); }
+
+/* ----------------------------------------------------------- fingerprint */
+
+.fingerprint {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--ink-3);
+  max-width: 26ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 900px) { .fingerprint { display: none; } }
+
+@media (max-width: 620px) {
+  .hero { padding: 44px 0 28px; }
+  .product { display: none; }
+  main { padding-bottom: 190px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation-duration: .001ms !important; transition-duration: .001ms !important; }
+}

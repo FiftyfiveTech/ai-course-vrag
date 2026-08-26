@@ -17,6 +17,7 @@ pipeline behind four endpoints and changes none of it.
 
 Endpoints
 ---------
+    GET  /                the frontend (web/), or a redirect to /docs without it
     GET  /health          is there an index, which arm, which config bytes
     POST /ask             question in, answer + citations + provenance out
     GET  /videos          which videos are indexed, and where each can be watched
@@ -67,6 +68,7 @@ from fastapi import Body, FastAPI, Request
 from fastapi import Path as PathParam
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 
 from schemas.api import (
     AskRequest,
@@ -101,6 +103,15 @@ from src.telemetry import Meter
 # open. Rejecting the id is the fix; sanitising it would leave the question of what it
 # sanitised to.
 VIDEO_ID = re.compile(r"\A[A-Za-z0-9_-]{1,64}\Z")
+
+# The frontend: static files, served by this same app. Same origin is the load-bearing part
+# and not a shortcut — a page served from here needs no `api.cors_origins` entry to call
+# /ask, and a citation's root-relative `stream_url` ("/media/611") resolves against the
+# origin it got the JSON from, which is the address already known to work. Served from the
+# repo rather than bundled, so editing web/app.js and reloading is the whole edit loop and
+# there is no build step to forget. Absent directory is not an error: it is a checkout that
+# does not have it, and `/` falls back to the docs the way it did before there was a UI.
+WEB = Path(__file__).resolve().parent.parent / "web"
 
 
 class ApiError(Exception):
@@ -429,9 +440,26 @@ def create_app(cfg: Config | None = None):
             headers=headers,
         )
 
-    @app.get("/", include_in_schema=False)
-    def root() -> RedirectResponse:
-        return RedirectResponse("/docs")
+    index = WEB / "index.html"
+
+    if index.is_file():
+        # StaticFiles, not a route per file: it answers HEAD, sends ETag/Last-Modified and
+        # honours If-None-Match, so a reload re-fetches the stylesheet only when it changed.
+        # html=False because there is nothing to serve as a directory index here — / is the
+        # route below, and a second way to reach the same page is a second thing to keep true.
+        app.mount("/static", StaticFiles(directory=str(WEB), html=False), name="static")
+
+        @app.get("/", include_in_schema=False)
+        def root() -> FileResponse:
+            """The UI. `/docs` is still the API's own page and is linked from the header."""
+            return FileResponse(index, media_type="text/html")
+
+    else:
+
+        @app.get("/", include_in_schema=False)
+        def root() -> RedirectResponse:
+            """No web/ in this checkout — send a browser somewhere useful anyway."""
+            return RedirectResponse("/docs")
 
     @app.get("/health", response_model=Health, tags=["status"])
     def health(request: Request) -> Health:
@@ -597,7 +625,8 @@ def main(argv: list[str] | None = None) -> int:
     port = args.port or int(cfg.get("api.port"))
 
     status = index_status(cfg)
-    print(f"VRAG API on http://{host}:{port}  (docs at /docs)")
+    ui = "UI at /" if (WEB / "index.html").is_file() else "no web/ — / redirects to /docs"
+    print(f"VRAG API on http://{host}:{port}  ({ui}, docs at /docs)")
     print(
         f"  index   {status.chunks} chunk(s) over {len(status.videos)} video(s) "
         f"in {status.collection!r}"

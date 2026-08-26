@@ -23,6 +23,7 @@ The failures this file exists to catch are the ones a browser sees and a unit te
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -36,6 +37,7 @@ from src.config import load as load_config
 from src.index import local_file
 from src.retrieve import RetrieveError, RetrievedChunk
 from src.api import (
+    WEB,
     ApiError,
     _numeric,
     _retry_after_s,
@@ -681,10 +683,52 @@ def test_the_openapi_document_describes_every_endpoint(tmp_path):
     assert "206" in paths["/media/{video_id}"]["get"]["responses"]
 
 
-def test_the_root_sends_a_browser_to_the_docs(tmp_path):
+# ---------------------------------------------------------------------------
+# The frontend — web/, served by this same app
+# ---------------------------------------------------------------------------
+#
+# The UI is static files and its behaviour is a browser's business, not pytest's. What is
+# testable here — and what actually breaks — is the wiring: that / serves the page rather
+# than the docs redirect, that the stylesheet and script it asks for exist at the urls the
+# HTML names, and that a checkout without web/ still lands a browser somewhere useful. A
+# renamed file under web/ is a blank page and no error anywhere, which is exactly the kind
+# of half-working this file exists to catch.
+
+
+def test_the_root_serves_the_frontend(tmp_path):
+    r = client(write_config(tmp_path)).get("/")
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/html")
+    assert "<title>VRAG" in r.text
+
+
+def test_the_page_asks_for_static_files_that_exist(tmp_path):
+    c = client(write_config(tmp_path))
+    page = c.get("/").text
+    for asset in re.findall(r'/static/[A-Za-z0-9_.-]+', page):
+        assert c.get(asset).status_code == 200, asset
+
+
+def test_the_frontend_calls_the_endpoints_this_app_serves(tmp_path):
+    # The client fetches by string literal; nothing type-checks those against the routes.
+    script = (WEB / "app.js").read_text(encoding="utf-8")
+    assert "'/health'" in script
+    assert "'/ask'" in script
+
+
+def test_the_root_falls_back_to_the_docs_without_a_web_directory(tmp_path, monkeypatch):
+    # A checkout that does not ship web/ is not broken, it just has no UI.
+    monkeypatch.setattr("src.api.WEB", tmp_path / "absent")
     r = client(write_config(tmp_path)).get("/", follow_redirects=False)
     assert r.status_code in (307, 308)
     assert r.headers["location"] == "/docs"
+
+
+def test_the_frontend_is_not_in_the_openapi_document(tmp_path):
+    # /docs describes the API a client codes against. The page and its assets are not that.
+    paths = create_app(write_config(tmp_path)).openapi()["paths"]
+    assert "/" not in paths
+    assert not [p for p in paths if p.startswith("/static")]
 
 
 def test_the_api_never_writes_a_page_to_disk(tmp_path, monkeypatch):

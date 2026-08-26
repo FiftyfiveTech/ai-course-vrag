@@ -174,13 +174,18 @@ ask:
 	uv run python -m src.ask "$(Q)" --config $(CONFIG) $(ASK_FLAGS)
 
 # THE DEMO, over HTTP. Same pipeline as `make ask` — retrieval, generation against the answer
-# schema, grounding, the padded seek — behind four endpoints, so a frontend can call it
-# instead of reading a file off disk:
+# schema, grounding, the padded seek — behind four endpoints, plus the frontend that calls
+# them:
 #
+#   GET  /                the UI (web/) — a question box, the answer, its citations, a player
 #   GET  /health          is there an index, which arm, which config bytes
 #   POST /ask             {"question": "..."} -> answer + citations + provenance
 #   GET  /videos          which videos are indexed, and where each can be watched
 #   GET  /media/{id}      the local media file, range-served so a player can actually seek
+#
+# Open http://127.0.0.1:8000 and ask. The UI is static files served by this same app, so it
+# needs no build step and no api.cors_origins entry — same origin — and editing web/app.js and
+# reloading the tab is the whole edit loop. /?q=... asks on load, so a question is a link.
 #
 # Interactive schema at /docs. Needs what `make ask` needs — the index (`make index-dev`) and,
 # on the groq arm, GROQ_API_KEY — but it starts without them and says so on /health, because a
