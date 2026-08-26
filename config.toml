@@ -99,3 +99,37 @@ model = "openai/whisper-large-v3-turbo"
 # Language hint passed to the model.  Omit (set to "") to auto-detect.
 # Explicit "en" is faster on English-only content.
 language = "en"
+
+[chunk]
+# Time-window chunking — VRAG-014. Read by src/chunk.py.
+#
+# Windows are a fixed grid on the video clock (0, hop, 2·hop, …), so the same transcript
+# chunks identically on every run and on either ASR arm. A segment is never cut in half,
+# which is why a chunk's recorded t_start/t_end are measured from the segments inside it
+# rather than copied off the grid.
+#
+# window_s has a ceiling that is not a matter of taste. QA_SPEC §2 scores a citation correct
+# when |citation.t_start - t_ref| <= 30, and a citation points at the chunk it came from, so a
+# chunk spanning more than 30 s can retrieve exactly the right passage and still be marked
+# wrong because its start is too early.
+#
+# 30.0 is *not* that ceiling, which a measurement caught and the derivation had missed:
+# segments are never split, so a chunk overhangs its window at *both* ends and the worst case
+# is window_s + 2 × (longest segment). On dev video 181 the longest whisper segment is 4.16 s
+# and window_s = 30.0 produced a 35.7 s chunk — 2 of 5 chunks past the tolerance. Swept on the
+# cached transcript ($0.00, no model call):
+#
+#   window  overlap  chunks  max chunk  over 30 s
+#   30.0    10.0     5       35.7 s     2
+#   25.0     8.0     6       29.0 s     0
+#   22.0     8.0     7       24.4 s     0
+#
+# 25.0 is the widest setting that keeps every chunk on dev citable. Re-sweep it when the ASR
+# arm changes — the bound depends on how long that arm's segments run.
+window_s = 25.0
+
+# How much of each window the next one repeats. A sentence straddling a boundary then lands
+# whole in at least one chunk. The cost is duplicated text — measured at 1.74× the transcript
+# on dev video 181 at these settings — so embedding spend scales with this number. That trade
+# is the subject of VRAG-018; this is the lever to sweep.
+overlap_s = 8.0
