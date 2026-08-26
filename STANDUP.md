@@ -228,3 +228,75 @@ Blocked:  nothing.
           do this gate is vacuous, which is exactly what its output says.
 Next:     VRAG-009 (failure tests: no audio track, zero-length, unreadable codec) is the
           next unstarted one of mine.
+
+## 2026-08-25 — Ritika (VRAG-014, Builder-side task on the board)
+Did:      VRAG-014 — time-window chunking. src/chunk.py: a fixed grid on the video clock
+          (0, hop, 2·hop, … where hop = window_s − overlap_s), both levers in config.toml
+          with no defaults. Every Chunk carries video_id, t_start, t_end, text, the segment
+          ids it holds and the grid window it came from. `make chunks VIDEO=…` dumps the
+          table and exits non-zero if verify() finds a problem. 59 tests in
+          tests/test_chunk.py, none of which need ffmpeg, network or a model call.
+          Segments are never split, so a chunk's t_start/t_end are *measured* from the
+          segments in it, not copied off the window bounds — the same class of bug as
+          VRAG-005's `-vf fps=N`. verify() re-derives that from the output rather than
+          trusting the constructor: every chunk's range must contain every segment it
+          claims, and every segment must be in ≥1 chunk.
+          Two windows are dropped on purpose and both are counted in the dump: one with no
+          speech (indexing silence costs money and retrieves nothing) and one whose segments
+          are exactly its predecessor's (overlap can make two neighbours identical when all
+          the speech falls in their intersection — that is index bloat, not recall).
+          The ASR result is cached in runs/<video>/transcript.json per source sha256 + model,
+          so re-chunking after moving a lever costs $0.00 and makes no model call. That is
+          what made the sweep below affordable.
+          One design decision was wrong and a measurement caught it. window_s = 30.0 was
+          derived from QA_SPEC §2 (a citation is scored on |t_start − t_ref| ≤ 30, and a
+          citation points at the chunk it came from). The derivation missed that a chunk
+          overhangs its window at *both* ends, so it runs to window_s + 2 × longest segment.
+          On dev video 181 that produced a 35.7 s chunk — 2 of 5 past the tolerance, i.e.
+          chunks that can retrieve the right passage and still be scored wrong. Swept on the
+          cached transcript and retuned to 25.0 / 8.0. The reasoning and the table are in
+          config.toml next to the values, and the dump now prints the longest segment beside
+          the chunk durations so the bound is visible rather than remembered.
+Number:   `make chunks VIDEO=samples/181_8np5YKYx3sU.mp4` (dev split, fetched from the
+          manifest url; gitignored) → video_id 181 from data/corpus/manifest.json (dev
+          split), window=25.0s overlap=8.0s hop=17.0s, 24 segments → 6 chunks from 6 windows
+          (0 empty, 0 duplicate), covers 0.000–88.520 s of 95.77 s, mean 15.6 s / max 29.0 s,
+          longest segment 4.16 s, 1022 chars indexed from 622 transcript chars (1.64× — the
+          overlap), 37 segment slots for 24 segments, **invariants 0 problems in 6 chunks**,
+          exit 0. $0.0000/video-hour on the re-run (cached transcript, no model call); the
+          first run that transcribed it printed $0.0400/video-hour 16.3×realtime.
+          Lever sweep on the cached transcript, $0.00, no model call:
+            window  overlap  chunks  max chunk  over 30 s  problems
+            30.0    10.0     5       35.7 s     2          0
+            25.0     8.0     6       29.0 s     0          0
+            22.0     8.0     7       24.4 s     0          0
+          Negative control — patched `t_end=float(w_end)` (copy the grid bound instead of
+          measuring the segments, the exact bug the module exists to prevent) and re-ran the
+          same command → `FAIL 3 problem(s) — a chunk lost its time range`, naming
+          `181-0002: range [32.0, 59.0] does not contain segment 11 [58.0, 61.0]`,
+          `181-0003: range [51.0, 76.0] does not contain segment 18 [75.34, 76.84]` and
+          `181-0005: t_end 110.0 is past the end of the video (95.774)`, exit 1 (make
+          reports 2). Patch reverted; `grep -c PROBE src/chunk.py` → 0 and the same command
+          is back to 0 problems, exit 0.
+          `uv run pytest tests -q --ignore=tests/gates` → 212 passed (was 140 passed /
+          13 skipped; +59 in tests/test_chunk.py, and the 13 ingest skips run now because
+          ffmpeg is on PATH in this shell)
+          `make gate` → leakage PASS (vacuous), 24 passed
+          `uv run pytest tests/gates/gate_phase0.py -q` → 9 passed
+          `make chunks VIDEO=samples/one.mp4` → 1 chunk, 0 problems (the synthetic fixture
+          transcribes to one segment, so it proves the wiring, not the windowing)
+Blocked:  nothing.
+          Flagging, not blocking, three things for the retro:
+          (1) window_s cannot *guarantee* a citable chunk on its own — the bound depends on
+          how long the ASR arm's segments run, so it has to be re-swept if the arm changes.
+          The dump prints the longest segment next to the durations for exactly that reason.
+          The clean fix belongs to VRAG-019: cite the supporting segment's t_start, not the
+          chunk's. Worth deciding there rather than papering over it here.
+          (2) `make gate` runs `pytest tests/gates -q`, which does not collect
+          gate_phase0.py — the filename does not match pytest's `test_*.py` pattern, so the
+          Phase 0 gate only runs when named explicitly. Ran it by hand (9 passed). Not fixed
+          here because renaming another person's gate mid-week is their call.
+          (3) The board has VRAG-014 assigned to vimal and the MCP authenticates as vimal,
+          so start/note/request_review were posted as Vimal again. Same mismatch as VRAG-005.
+Next:     VRAG-009 (failure tests: no audio track, zero-length, unreadable codec) is still
+          the next unstarted one on the board.

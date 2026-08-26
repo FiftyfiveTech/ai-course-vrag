@@ -74,6 +74,32 @@ Without that both would number from `q001` and the id check would fire on work t
 `evals/dev/` is still empty, so today the check passes **vacuously** and says so in its output. It
 starts meaning something with the first dev case.
 
+## Chunking
+
+`src/chunk.py` (VRAG-014) turns one video's transcript into the units retrieval works on.
+Windows are a fixed grid on the video clock — 0, `hop`, 2·`hop`, … where
+`hop = window_s - overlap_s` — so the same transcript chunks identically on every run and on
+either ASR arm. Every chunk carries the `video_id`, `t_start` and `t_end` a citation is built
+from, and because segments are never split, that range is **measured from the segments in the
+chunk** rather than copied off the window bounds.
+
+```bash
+make chunks VIDEO=samples/181_8np5YKYx3sU.mp4    # dumps the table; exits non-zero on a problem
+```
+
+| | |
+|---|---|
+| Levers | `chunk.window_s`, `chunk.overlap_s` in `config.toml`. No defaults — a missing one raises |
+| Invariants | Every chunk has a forward, finite range that contains every segment in it; every segment is in ≥1 chunk; ids unique, order monotonic, nothing past the end of the video |
+| Dropped on purpose | A window with no speech, and a window whose segments are exactly its predecessor's. Both are counted in the output, never silent |
+| Free to re-run | The ASR result is cached in `runs/<video>/transcript.json` per source sha256, so sweeping `window_s` costs $0.00 and makes no model call |
+
+`window_s = 25.0` is a measured value, not a preference. QA_SPEC §2 scores a citation on
+`|citation.t_start − t_ref| ≤ 30`, so a chunk wider than 30 s can retrieve the right passage
+and still be marked wrong. 30 s is *not* the ceiling that implies: a chunk overhangs its window
+at both ends, so it runs to `window_s + 2 × (longest segment)`. On dev video 181 `window_s = 30`
+produced a 35.7 s chunk — 2 of 5 past the tolerance. 25.0 is the widest setting where none are.
+
 ## Rules that live in this repo
 
 `CLAUDE.md` carries the full contract. The short version:

@@ -1,4 +1,4 @@
-.PHONY: setup doctor corpus corpus-check corpus-pointers heldout-check leakage-check sample sample-real test gate demo clean
+.PHONY: setup doctor corpus corpus-check corpus-pointers heldout-check leakage-check sample sample-real test gate demo chunks clean
 .DEFAULT_GOAL := help
 
 # The video the demo ingests, and the file the levers are read from. Both overridable:
@@ -19,6 +19,7 @@ help:
 	@echo "make test    unit tests"
 	@echo "make gate    run every phase gate in tests/gates/"
 	@echo "make demo    ingest VIDEO -> wav + sampled frames + media.json"
+	@echo "make chunks  dump the chunk table for VIDEO; non-zero if a chunk lost its time range"
 
 setup:
 	@command -v uv >/dev/null || { echo "uv not installed: curl -LsSf https://astral.sh/uv/install.sh | sh"; exit 1; }
@@ -76,6 +77,13 @@ sample-real:
 # a rule and gets built; any other path has to already exist.
 demo: $(VIDEO)
 	uv run python -m src.ingest $(VIDEO) --config $(CONFIG)
+
+# The VRAG-014 gate: transcript -> time windows -> chunk table, one row per chunk with its
+# video_id and time range, and a non-zero exit if any chunk's range does not hold the
+# segments in it. The ASR result is cached per source sha256, so re-running after changing
+# chunk.window_s re-chunks for $0.00 and makes no model call.
+chunks: $(VIDEO)
+	uv run python -m src.chunk $(VIDEO) --config $(CONFIG)
 
 clean:
 	rm -rf .venv .pytest_cache **/__pycache__
