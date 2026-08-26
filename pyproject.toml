@@ -9,6 +9,7 @@ dependencies = [
     "datasets>=2.19",
     "groq>=0.9",
     "ollama>=0.3",
+    "chromadb>=0.5",
 ]
 
 [dependency-groups]

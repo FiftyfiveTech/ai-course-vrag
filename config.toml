@@ -62,6 +62,23 @@ tone_hz = 440
 # px anyway, so a 4K pull is bandwidth spent on pixels we throw away.
 max_height = 720
 
+[embed]
+# Embedding model, named by HF repo id.  Must be pulled in Ollama first:
+#   ollama pull hf.co/nomic-ai/nomic-embed-text-v1.5
+# nomic-embed-text-v1.5 is 137 M params and runs on CPU in ~30 ms per chunk.
+model = "nomic-ai/nomic-embed-text-v1.5"
+
+# Chroma persistent directory.  Relative to the project root.
+chroma_path = "./chroma"
+
+# Chroma collection name.  One collection per pipeline run is fine for the MVP;
+# change this to version the index without deleting the old one.
+collection = "vrag"
+
+# How many chunks to send to Ollama in one embed call.  32 is a safe default;
+# raise it if Ollama is local and you have RAM to spare.
+batch_size = 32
+
 [transcript]
 # Which transcription arm to use.  "groq" hits the Groq API (GROQ_API_KEY required);
 # "ollama" runs the model locally via Ollama (no API key, but the model must be pulled).
