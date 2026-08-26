@@ -44,6 +44,8 @@ RATES: dict[str, tuple[str, float]] = {
     "openai/whisper-large-v3-turbo": (_UNIT_AUDIO, 0.04 / 3600),
     # Ollama local embedding — no charge.
     "nomic-ai/nomic-embed-text-v1.5": (_UNIT_TOKENS, 0.0),
+    # Ollama local chat — no charge.
+    "meta-llama/Llama-3.2-3B-Instruct": (_UNIT_TOKENS, 0.0),
 }
 
 

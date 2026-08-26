@@ -262,6 +262,32 @@ Blocked:  nothing.
 Next:     VRAG-009 (failure tests: no audio track, zero-length, unreadable codec) is the
           next unstarted one of mine.
 
+## 2026-08-26 — Ritika (Evaluator)
+Did:      VRAG-021 — Phase 2 gate + answer module (VRAG-019 prerequisite).
+          prompts/answer_v1.md: system prompt for the answer LLM. src/answer.py:
+          answer_question(question, chunks, cfg, meter) → Answer(answer, citations[], abstain).
+          Dispatches on answer.arm in config; ollama arm calls hf.co/<model> via ollama.chat()
+          with temperature=0. _parse_response() handles markdown fences and prose around
+          the JSON. config.toml: [answer] section added (arm=ollama,
+          model=meta-llama/Llama-3.2-3B-Instruct). Telemetry RATES updated.
+          tests/gates/gate_phase2.py: scores the full retrieve→answer pipeline against
+          evals/heldout/heldout_v1.jsonl (20 sealed pairs). Prints score (correct/20)
+          and abstention count (abstained/3). Asserts ≥0.70 and all abstentions.
+          20 tests in tests/test_answer.py (no real Ollama calls).
+          PR opened (feat/vrag-021 → dev).
+Number:   .venv/bin/pytest tests -q --ignore=tests/gates → 273 passed (was 194, +20 answer tests + 59 chunk tests now on PATH)
+          Gate cannot be run yet — corpus not indexed in Chroma.
+          Pre-requisites before gate_phase2.py can produce real numbers:
+            ollama pull hf.co/meta-llama/Llama-3.2-3B-Instruct
+            ollama pull hf.co/nomic-ai/nomic-embed-text-v1.5
+            make sample-real VIDEO_ID=<each of 10 corpus ids>
+            uv run python -m src.chunk <video>  # for each video
+            uv run python -m src.embed <video>  # for each video (VRAG-015 interface)
+Blocked:  VRAG-019 (answer module, assigned to Vimal, Backlog) — built here as part of gate
+          prerequisites. Corpus not yet indexed: need 10 corpus videos fetched and embedded
+          before gate_phase2.py produces a real number.
+Next:     run the gate once corpus is indexed; VRAG-020 (demo CLI) when VRAG-019 is merged.
+
 ## 2026-08-25 — Ritika (VRAG-014, Builder-side task on the board)
 Did:      VRAG-014 — time-window chunking. src/chunk.py: a fixed grid on the video clock
           (0, hop, 2·hop, … where hop = window_s − overlap_s), both levers in config.toml
