@@ -64,9 +64,38 @@ max_height = 720
 
 [embed]
 # Embedding model, named by HF repo id.  Must be pulled in Ollama first:
-#   ollama pull hf.co/nomic-ai/nomic-embed-text-v1.5
+#   ollama pull hf.co/nomic-ai/nomic-embed-text-v1.5-GGUF
 # nomic-embed-text-v1.5 is 137 M params and runs on CPU in ~30 ms per chunk.
-model = "nomic-ai/nomic-embed-text-v1.5"
+#
+# The repo id carries the -GGUF suffix because Ollama can only load GGUF weights, and the
+# measurement that forced it (VRAG-017, first time anything actually pulled this model):
+#
+#   ollama pull hf.co/nomic-ai/nomic-embed-text-v1.5
+#   Error: pull model manifest: 400: {"error":"Repository is not GGUF or is not compatible
+#   with llama.cpp"}
+#
+# nomic-ai/nomic-embed-text-v1.5 ships Sentence-Transformers weights, so `hf.co/<that id>`
+# — which is what src/embed.py builds — can never resolve. nomic-ai/nomic-embed-text-v1.5-GGUF
+# is the same model, same publisher, converted; it pulls (49 MB) and returns the 768-dim
+# vectors src/embed.py asserts on. Same class of bug as the Groq whisper id: the HF repo id
+# is the name, but only the runnable variant of it is a name the runtime accepts.
+#
+# The :F16 tag is not decoration, and it is the single biggest quality lever found this week.
+# `ollama pull hf.co/<repo>` with no tag picks the repo's smallest file, which here is
+# Q2_K - 2-bit weights on a 137 M-param encoder. Swept on evals/dev, 346 chunks, 12
+# answerable pairs, recall@5 by the QA_SPEC sec.2 rule:
+#
+#   Q2_K   no prefixes                    5/12 = 0.4167
+#   F16    no prefixes                   11/12 = 0.9167
+#   F16    nomic task prefixes both      10/12 = 0.8333
+#   Q2_K   nomic task prefixes both       2/12 = 0.1667
+#
+# Two things in that table. Quantisation was the whole story: same code, same chunks, same
+# questions, 0.42 -> 0.92 on 225 MB more weights. And the prefixes nomic documents
+# ("search_document: " on chunks, "search_query: " on questions) cost 0.08 here rather than
+# buying anything, so they are deliberately not used - see the README. Neither of those was
+# predictable from reading the model card; both came out of the sweep.
+model = "nomic-ai/nomic-embed-text-v1.5-GGUF:F16"
 
 # Chroma persistent directory.  Relative to the project root.
 chroma_path = "./chroma"
@@ -99,6 +128,29 @@ model = "openai/whisper-large-v3-turbo"
 # Language hint passed to the model.  Omit (set to "") to auto-detect.
 # Explicit "en" is faster on English-only content.
 language = "en"
+
+# Upload cap for one ASR request, MB. Audio longer than this is split, transcribed piece by
+# piece, and each piece's segment times are shifted back onto the video clock.
+#
+# Not a preference — a measured wall. Groq returns 413 above its own limit, and ingest writes
+# 16 kHz mono s16le at 32 kB/s, so the arm tops out around 13 min of video per request:
+#
+#   $ uv run python -m src.index samples/611_H8fGd3fCJbg.mp4     # 30 min, 57.8 MB of wav
+#   FAIL - groq arm failed: Error code: 413 - {'error': {'message': 'Request Entity Too
+#   Large', 'type': 'invalid_request_error', 'code': 'request_too_large'}}
+#
+# The dev split is 1 short + 1 medium + 2 long by VRAG-004's quota, so without splitting half
+# the dev set is un-indexable and the Phase 1 gate cannot be scored on the videos it names.
+#
+# 20.0 against a 25 MB cap: the multipart request carries the wav plus form overhead, and the
+# margin costs one extra piece on a long video rather than a 413 at the end of an upload.
+max_upload_mb = 20.0
+
+# How far either side of a nominal cut to look for a quiet moment, seconds. A cut through the
+# middle of a word costs that word twice — whisper hears half a syllable at the end of one
+# piece and half at the start of the next. 5.0 s is enough to find a pause in speech; raising
+# it makes pieces less even for no measured gain.
+split_search_s = 5.0
 
 [answer]
 # Answer model for VRAG-019/020/021.  Named by HF repo id.  Must be pulled in Ollama:

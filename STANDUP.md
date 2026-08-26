@@ -359,3 +359,144 @@ Blocked:  nothing.
           so start/note/request_review were posted as Vimal again. Same mismatch as VRAG-005.
 Next:     VRAG-009 (failure tests: no audio track, zero-length, unreadable codec) is still
           the next unstarted one on the board.
+
+## 2026-08-26 — Ritika (Evaluator)
+Did:      VRAG-017 — the Phase 1 gate. tests/gates/gate_phase1.py computes recall@5 on
+          evals/dev and asserts >= 0.80. Five preconditions run before the number, each of
+          which can void it: dev n heldout empty AND dev non-empty; at least one answerable
+          pair per dev video; the index holds chunks for all 4 dev video_ids; top_k == 5;
+          and the gate's own scoring agrees with src.retrieve.recall_at_k to 1e-9. K is
+          pinned in the gate rather than read from config, because a gate whose k moves
+          with the config it grades can be passed by editing the config. Prints per-question
+          HIT/MISS with rank and delta-t, so a number under threshold says which question
+          missed and whether it was the wrong video or the wrong moment. ASCII-only output
+          for the cp1252 reason VRAG-013 already hit.
+          Also src/index.py + `make index` / `make index-dev` / `make gate-phase1`, which is
+          the step VRAG-015/016 left out: embed_and_persist() had no caller, so the gate had
+          an index to score and no way to build one. --dev reads the dev split from the
+          manifest instead of hard-coding ids. --reset drops the collection, because chunk
+          ids come from the chunk levers and an index built across a window_s change holds
+          two generations of rows and scores better than either. 19 tests, no network.
+          Two findings and two blockers, below.
+Number:   `ollama pull hf.co/nomic-ai/nomic-embed-text-v1.5` -> 400 "Repository is not GGUF
+          or is not compatible with llama.cpp". The configured embedding model could never
+          have been pulled; VRAG-015's end-to-end run was deferred, so nobody had tried.
+          `ollama pull hf.co/nomic-ai/nomic-embed-text-v1.5-GGUF` -> success, 49 MB, and
+          ollama.embed returns dim 768, matching embed.EMBED_DIM. config.toml now names the
+          -GGUF repo with the error recorded next to it. Same class as the Groq whisper wire
+          id: the HF repo id is the name, but only the runnable variant is a name the
+          runtime accepts.
+          Self-retrieval over the 48 indexed chunks, each chunk's own text as the query — a
+          quality check that needs no labels:
+            no prefix                 @1 = 46/48 = 0.9583   @5 = 48/48 = 1.0000
+            "search_query: " prefix   @1 = 14/48 = 0.2917   @5 = 27/48 = 0.5625
+          nomic-embed-text-v1.5 documents task prefixes, so prefixing the query side looks
+          free. It is a 0.96 -> 0.29 regression: documents went in unprefixed and the
+          asymmetry is what breaks it. Prefix both sides or neither — for VRAG-018.
+          `uv run python -m src.index samples/181_8np5YKYx3sU.mp4` -> 6 chunks, 95.8s,
+          24 segments (cache), $0.0000/video-hour.
+          `uv run python -m src.index samples/521_qJGqZ_g__So.mp4` -> 42 chunks, 713.6s,
+          122 segments (groq), $0.0400/video-hour, 47.6x realtime.
+          Index holds 48 chunks: Counter({'521': 42, '181': 6}) — first time anything has
+          been in Chroma.
+          `uv run python -m src.doctor` -> 12 PASS 0 WARN 0 FAIL. ffmpeg lives at
+          .../WinGet/Packages/Gyan.FFmpeg_.../ffmpeg-9.0-full_build/bin — 9.0, the 8.0 path
+          is gone, which is worth knowing before 13 ingest tests skip and the suite looks
+          green.
+          `uv run pytest tests -q --ignore=tests/gates` -> 272 passed.
+          `uv run pytest tests/gates/gate_phase1.py -v -s` -> 3 failed, 2 passed, 3 skipped.
+          The three failures are the gate refusing to report a number it cannot stand
+          behind. That is the intended output today, not a regression.
+          NO recall@5 NUMBER. 0.0000 is what the machinery returns and it measures two
+          missing inputs, not retrieval.
+Blocked:  Two, both escalated on the card rather than worked around.
+          (1) 2 of the 4 dev videos cannot be transcribed. `make index` on both long ones:
+          "Error code: 413 - Request Entity Too Large" from Groq. 611 is 30 min / 57.8 MB of
+          wav, 701 is 54 min / 104.6 MB. 16 kHz mono s16le is 32 kB/s, so the arm tops out
+          near 13 min of video on the free tier and src/transcript.py has no splitting. The
+          dev split is 1 short + 1 medium + 2 long by VRAG-004's quota, so this is half the
+          dev set and 84 of the 96 dev minutes — not an edge case. The fix is splitting on
+          silence and stitching segment times back onto the video clock, inside VRAG-008's
+          groq arm: a Done task's module, not mine to rewrite under this card.
+          (2) evals/dev is still empty and no card owns it. I could author pairs from the
+          transcripts I just indexed and am deliberately not doing it — the questions would
+          be paraphrases of the exact text being retrieved, which measures "can the embedder
+          find the sentence I copied" while reading as a recall number. That is the failure
+          this course was built around: 1.0000 on self-written labels, 0.5195 on real ones.
+          Video-MME ships its own Q&A but the licence forbids committing it, so the labels
+          have to be human-written against the video.
+Next:     blocked on the two decisions above. VRAG-009 (failure tests: no audio track,
+          zero-length, unreadable codec) is the next unstarted one of mine and does not
+          depend on either.
+
+## 2026-08-26 — Ritika (Evaluator) — VRAG-017 continued
+Did:      Same session as the block above; that one escalated two blockers and reported no
+          recall number. Both were cleared with the supervisor's go-ahead, so the entry
+          above is superseded on its conclusions and kept for the trajectory.
+          (1) Groq audio splitting, in VRAG-008's arm. transcript.max_upload_mb and
+          split_search_s in config.toml; split_wav() cuts a too-long wav into pieces under
+          the cap and offset_segments() shifts each piece's times back onto the video clock.
+          Cuts are not at the nominal boundary: each one moves to the quietest 200 ms within
+          +/-5 s, found by a prefix sum over that window, because a cut through a word costs
+          the word twice - whisper hears half a syllable at the end of one piece and half at
+          the start of the next.
+          (2) evals/dev/dev_v1.jsonl - 15 pairs, 12 answerable (3 per dev video) and 3
+          unanswerable. Written from the transcripts, NOT from watching, and every pair
+          carries "derived_from": "transcript" so it cannot be mistaken for a video-verified
+          label. evals/dev/README.md says in full why a number from this set is optimistic.
+          Also: `make gate` was green while running ZERO phase gates. pytest's default
+          python_files is "test_*.py *_test.py", so `pytest tests/gates` collected only
+          test_no_leakage.py and printed "24 passed". Naming a file explicitly collects it
+          regardless, which is how gate_phase0 was ever seen to pass and why nobody caught
+          it. pyproject now adds "gate_*.py". `make gate` went from 24 tests to 41.
+Number:   THE PHASE 1 GATE PASSES.
+          `make gate-phase1` -> recall@5 = 0.9167  (11/12 answerable dev pairs)  threshold 0.80
+          recall_at_k() 0.9167 == gate 0.9167, index 346 chunks over ['181','521','611','701'],
+          12 embed calls, 1.54 s, $0.0000. 8 passed.
+          ONE dev-tuned attempt, and it was not a chunk lever. The embedding model was being
+          served at 2-bit. `ollama pull hf.co/<repo>` with no tag takes the repo's SMALLEST
+          file, and `ollama show` says quantization Q2_K on a 137 M-param encoder. Swept on
+          evals/dev, 346 chunks, 12 answerable pairs:
+            Q2_K  no prefixes                 5/12 = 0.4167   <- what config.toml had
+            F16   no prefixes                11/12 = 0.9167   <- what it has now
+            F16   nomic task prefixes both   10/12 = 0.8333
+            Q2_K  nomic task prefixes both    2/12 = 0.1667
+          Same code, same chunks, same questions: 0.4167 -> 0.9167 on 225 MB more weights. A
+          gate run before that sweep would have blamed the chunker or the window size. And
+          the task prefixes nomic documents COST 0.08 on F16, so they are deliberately unused.
+          Neither result was predictable from the model card.
+          Before that, the model in config could not be pulled at all:
+          `ollama pull hf.co/nomic-ai/nomic-embed-text-v1.5` -> 400 "Repository is not GGUF
+          or is not compatible with llama.cpp". That repo ships Sentence-Transformers
+          weights and src/embed.py builds hf.co/<repo id>, so VRAG-015's embed path had
+          never run. Same class as the Groq whisper wire id.
+          Splitting, measured: 611 (57.8 MB, 30.1 min) -> 3 pieces, 256 segments, 107 chunks.
+          701 (104.6 MB, 54.5 min) -> 6 pieces, 1143 segments, 191 chunks. Stitching checked
+          on 611 rather than assumed: segments span 0.0 -> 1804.83 s of an 1805 s video,
+          monotonic, no gap over 15 s. Un-offset pieces would have ended near 600 s.
+          701 also surfaced a real bug the split made visible: whisper reported t_end BEFORE
+          t_start on a piece opening mid-utterance -
+          "segment has an impossible time range (t_start=2952.9691225, t_end=2946.7534625)"
+          - and the chunker refused the whole 54-minute video over one segment. Repairing a
+          duration would be inventing it, so transcript.drop_impossible() discards segments
+          whose range does not run forward and prints the count: "dropped 2 of 1145".
+          `make gate`         -> leakage PASS (15 dev / 20 heldout / overlap 0, non-vacuous
+                                 for the first time), then 41 passed, exit 0
+          `make test`         -> 297 passed (was 272; +19 index, +25 transcript split/drop)
+          `make doctor`       -> 12 PASS 0 WARN 0 FAIL
+          `make index-dev`    -> 4 video(s) ['181','521','611','701'], 346 chunks over
+                                 98.0 min, $0.0000 (ASR served from cache, no model call)
+          Session spend: $0.04/video-hour on the three Groq transcripts (181 was cached).
+          Everything else - every embed call, every re-index, the whole sweep - $0.00 local.
+Blocked:  nothing.
+          Flagging for the retro, not blocking: 0.9167 is measured on labels I wrote from
+          the transcripts that are being retrieved. That is the weak side of this result and
+          evals/dev/README.md says so on the tin. The set has no question whose answer is
+          only on screen, because one cannot be written from a transcript - so the visual
+          half of "video RAG" is completely unmeasured going into Phase 2. d001 also hits at
+          exactly dt = 30.0 s, dead on the QA_SPEC tolerance; a rounding change flips it.
+          Second: config.toml embed.model now carries a quantisation tag
+          (nomic-ai/nomic-embed-text-v1.5-GGUF:F16). Worth confirming that reads as within
+          the HF-repo-id rule - the repo id is intact and the tag names which file in it,
+          which is strictly more precise, but it is a convention call and not mine to make.
+Next:     VRAG-009 (failure tests: no audio track, zero-length, unreadable codec).
