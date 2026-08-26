@@ -184,6 +184,23 @@ Blocked:  end-to-end test deferred — needs `ollama pull hf.co/nomic-ai/nomic-e
           VRAG-014 (chunking, Vimal) not merged yet; Chunk shape agreed here.
 Next:     VRAG-016 (retrieve: question → top-k chunks; recall@5 on dev)
 
+## 2026-08-26 — Ritika (Evaluator)
+Did:      VRAG-016 — retriever. src/retrieve.py: retrieve(question, cfg, meter)
+          embeds question via Ollama (same model as embed), queries Chroma,
+          returns list[RetrievedChunk(video_id, t_start, t_end, text, score)].
+          recall_at_k(cfg, meter) loads evals/dev/*.jsonl, runs retrieve() per
+          answerable pair, scores hit as: correct video_id AND
+          |t_start - t_ref| <= 30 s (QA_SPEC tolerance). Returns 0.0 vacuously
+          when dev is empty. config.toml: [retrieve] top_k = 5 added.
+          22 tests in tests/test_retrieve.py (no real Ollama/Chroma calls).
+          PR #15 opened (feat/vrag-016 → dev).
+Number:   .venv/bin/pytest tests -q --ignore=tests/gates → 194 passed (was 172, +22)
+          recall_at_k returns 0.0 vacuously today — evals/dev/ has no pairs yet.
+          Real number available once dev pairs are written (VRAG-016 scoring task).
+Blocked:  nothing. evals/dev/ is empty so recall@5 cannot be measured yet.
+          Need dev Q&A pairs before the Phase 1 gate (VRAG-017) can be run.
+Next:     VRAG-021 (Gate Phase 2) or wait for dev pairs to score recall@5.
+
 ## 2026-08-25 — Ritika (Evaluator)
 Did:      VRAG-013 — the blind-labelling seal. src/leakage.py computes
           evals/dev ∩ evals/heldout by content hash; tests/gates/test_no_leakage.py is the
