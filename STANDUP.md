@@ -474,3 +474,105 @@ Blocked:  nothing.
           the HF-repo-id rule - the repo id is intact and the tag names which file in it,
           which is strictly more precise, but it is a convention call and not mine to make.
 Next:     VRAG-009 (failure tests: no audio track, zero-length, unreadable codec).
+
+## 2026-08-26 — Vimal (Builder) — VRAG-019
+Did:      Answering with citations, and the gate for it.
+            schemas/answer.py           {answer, citations[{video_id,t_start,t_end}], abstain}
+            prompts/answer_v1.md        the prompt, on disk; ## System / ## User are the messages
+            src/answer.py               retrieve -> render_context -> model -> validate -> ground
+            tests/gates/gate_phase2a.py the VRAG-019 gate
+            config.toml [answer]        arm / model / prompt / temperature / max_tokens
+          openai/gpt-oss-120b on Groq's free tier. Checked the model list rather than guessing:
+          Groq serves exactly two models with a real HF repo id and a chat endpoint,
+          openai/gpt-oss-120b and openai/gpt-oss-20b. groq/compound* has no HF repo id and is
+          out per CLAUDE.md; qwen/qwen3.6-27b is not an HF repo id either. gpt-oss-120b is also
+          the first model in this pipeline whose HF repo id and wire id are the SAME string -
+          whisper's are not, nomic's needed -GGUF:F16 - so _groq_wire_name() says so in one
+          place with a test on it, rather than a .split("/") inline somewhere.
+          One declaration, two jobs: schemas.answer.json_schema() renders the Pydantic model as
+          the JSON Schema handed to Groq's strict response_format, and Answer.model_validate
+          checks the reply. Strict mode wants every property in `required` and no $ref, so the
+          Citation definition is inlined and every object closed.
+          ground() runs AFTER validation, never before. Validation proves a citation is well
+          formed; it cannot prove it is real - {"video_id":"611","t_start":412.0} is a valid
+          object for a question whose passages were all from 701. So a citation for a video that
+          was never retrieved is dropped, a drifted timestamp is snapped onto the passage it
+          came from, and if nothing survives the reply becomes an abstention. That direction
+          cannot lose a point: QA_SPEC sec.2 needs a citation on the ground-truth video, so a
+          reply whose every citation was invented is already scored incorrect. Running ground()
+          before validation would have made schema-valid a number about a repaired copy.
+Number:   THE VRAG-019 GATE PASSES.
+          `uv run pytest tests/gates/gate_phase2a.py -v -s`  ->  10 passed, 84 s run alone
+            schema-valid = 1.0000  (15/15 dev pairs)  threshold 1.00
+            abstentions = 3/3 planted unanswerable pairs  threshold 3/3
+            abstention rate: 1.0000 on 3 unanswerable, 0.0833 on 12 answerable (1/12)  ceiling 0.25
+            selectivity = 0.9167   (an abstain-everything module scores 0.0000)
+            citations: 12 across 15 pairs, all grounded; ground() repaired 0/15
+            cost: 15 generation + 15 embed calls, 24279 tokens, $0.0000
+          `make gate`   -> leakage PASS (15 dev / 20 heldout / overlap 0), then 51 passed
+                           (was 41; +10 gate_phase2a). 237 s - the hosted calls are most of it.
+          `make test`   -> 367 passed. 48 of those are new: tests/test_answer.py and
+                           tests/test_schemas_answer.py, none of which touch a network.
+          `make doctor` -> 12 PASS 0 WARN 0 FAIL
+          ZERO dev-tuned prompt attempts. answer_v1.md is v1 and was never edited - and no edit
+          to it could have helped, see d001.
+          Two findings. The first caught a defect in MY OWN gate before it reached review.
+          (1) THE PROVIDER IS NOT REPRODUCIBLE AT temperature = 0.0. The gate passed; I changed
+          nothing that touches the prompt; the next run failed on d001. Six identical calls for
+          d001, same code, same config, same prompt:
+            ANSWER "She says she will take you back."  ANSWER (same)  ABSTAIN
+            ANSWER "...bang bang, all over you."  ABSTAIN  ANSWER (same, punctuation differs)
+          4 answers, 2 abstentions, three different texts. Three full passes over evals/dev:
+            pass 1   15/15 schema-valid   3/3 abstain(unanswerable)   1/12 abstain(answerable)
+            pass 2   15/15               3/3                         1/12
+            pass 3   15/15               3/3                         2/12
+          Only d001 moves. d010 abstains in all three. Everything else answers in all three. So
+          both numbers the card asks for are stable and the guard number has a one-pair wobble.
+          temperature 0.0 pins the sampler, not the arithmetic. The gate's third check is now a
+          RATE with a 0.25 ceiling (3 of 12 - one pair of margin over the worst pass observed)
+          instead of a per-pair "zero false abstentions", and the six lines are recorded in
+          config.toml beside the lever so nobody re-learns this from a red gate.
+          (2) d001's Phase 1 HIT IS ON A CHUNK WHOSE ENTIRE TEXT IS "." - so recall@5 = 0.9167
+          includes a pair the answerer can never convert. The line asked about is "I'm gonna
+          graduate" at t_ref=30.0 s and NO retrieved passage contains it; the chunk that does is
+          outside the top 5. What satisfies the QA_SPEC sec.2 rule is video 181 at t_start=0.0
+          with text "." (dt = 30.0, dead on the tolerance Ritika flagged last session) plus a
+          lyric chunk at 51.0 s. Both are inside +/-30 s; neither holds the answer. Two
+          consequences, and I fixed NEITHER, deliberately:
+            - src/chunk.py drops "a window with no speech", but "." is a non-empty segment text,
+              so a punctuation-only chunk is embedded and retrievable. A VRAG-014/017 finding;
+              fixing it moves a recorded, reviewed Phase 1 number that belongs to another gate.
+            - a timestamp-only hit rule cannot tell "the answer was retrieved" from "a passage
+              near the right second was retrieved". That is the Evaluator's contract.
+          Both are on the card for the supervisor rather than changed under this task.
+          Also measured, because the README promises the local arm's number is not assumed:
+          bartowski/Llama-3.2-3B-Instruct-GGUF:Q4_K_M via arm = "ollama", all 15 dev pairs.
+            schema-valid 12/15 (vs 15/15), abstained on the unanswerable 1/3 (vs 3/3),
+            false abstentions 0/12, ~50 min (vs ~85 s).
+          All three schema failures are the SAME failure, and it is the one rule in the schema
+          that is a judgement call rather than a type check: abstain = true WITH a citation.
+            {"answer": "The passage does not mention the name of Mike Ross's grandmother.",
+             "citations": [{"video_id":"701","t_start":0.0,"t_end":0.0}], "abstain": true}
+          It declines correctly, then staples a zero-timestamp citation on. Constrained decoding
+          got the shape right on both models; only the big one got the coherence right.
+          Cost: $0.0000, everything. Groq free tier on generation, Ollama local on every embed.
+          24279 tokens for a full gate run; the arm logs token volume through the shared meter
+          even at rate 0.0 so a tier change shows up in the number instead of nowhere.
+Blocked:  nothing. Three things flagged for review, none blocking:
+          (a) I put the "abstain => no citations" rule IN the schema, so QA_SPEC sec.4 is
+          enforced as invalidity. That is why the local arm scores 12/15: two semantically
+          correct refusals are counted invalid over a stray zero citation. Moving that rule out
+          of the schema and into ground(), which already normalises replies into abstentions,
+          would score the local arm 15/15 with 3/3 abstentions and 2 repairs. I did not, because
+          it makes the VRAG-019 criterion EASIER to pass and the configured arm is 15/15 with
+          the strict rule. Reversible, and the reviewer's call, not mine to make quietly.
+          (b) This gate says the contract holds and the refusal is selective. It says NOTHING
+          about whether the answers are right. Both d001 answers the model produced ("take you
+          back", "bang bang all over you") are wrong, and QA_SPEC sec.2 scores at least one of
+          them CORRECT - sec.2 checks video_id and t_start and never the answer text. A high
+          VRAG-021 accuracy is therefore compatible with wrong answer text throughout. Worth a
+          decision BEFORE that gate is scored, not after.
+          (c) render_context() lists passages in retrieval order, not chronological, so a
+          question with "first" / "before" / "at the start" gets an unordered list. Untested
+          idea, no number behind it, so it is not in - but it is the obvious Phase 2 lever.
+Next:     VRAG-020, whatever the board has after this one. The answer path is in place for it.

@@ -23,8 +23,8 @@ other person as a collaborator with push access.
 | `samples/` | Sample videos, **generated or fetched, never committed**. `make sample` writes a synthetic clip; `make sample-real VIDEO_ID=…` pulls one dev video from its manifest url. |
 | `runs/` | Ingest output, one directory per video: `audio.wav`, `frames/`, `media.json`. Gitignored. |
 | `data/corpus/` | The 10-video pilot corpus: **pointers only**, never media. `manifest.json` + `PROVENANCE.md` (licence, provenance, how the split was chosen). |
-| `prompts/` | Versioned prompt files (`extract_v1.md`, `extract_v2.md`, …). Never inline a prompt in code. |
-| `schemas/` | Pydantic models. Structured output is validated, not parsed by hand. |
+| `prompts/` | Versioned prompt files. `answer_v1.md` is the Phase 2 answering prompt; its `## System` / `## User` sections are the messages, the rest is commentary. Never inline a prompt in code. |
+| `schemas/` | Pydantic models. `answer.py` is the `{answer, citations[], abstain}` contract — one declaration, used both to constrain generation and to validate the reply. |
 | `evals/dev/` | **Builder** tunes here. 15 cases (`dev_v1.jsonl`): 12 answerable, 3 not. Written from the transcripts, not from watching — see [evals/dev/README.md](evals/dev/README.md) before quoting a number from them. |
 | `evals/heldout/` | **Evaluator** only. Sealed Wednesday, tagged `heldout-v1`. The Builder never reads it. |
 | `evals/QA_SPEC.md` | What a correct citation is (±30 s), what counts as unanswerable, how the gate scores. |
@@ -191,6 +191,202 @@ vocabulary with the chunk it is meant to find and 0.9167 is optimistic by constr
 says the retrieval path is wired correctly and that F16 weights fixed a real defect. It is not
 evidence that retrieval works on questions a user would actually ask. `d001` also hits at
 exactly `dt = 30.0 s`, dead on the tolerance boundary — a rounding change either way flips it.
+
+## Answering with citations
+
+`src/answer.py` (VRAG-019) is the half of the pipeline retrieval cannot do: read the five
+passages and either answer from them with a timestamp, or say the corpus does not cover it.
+
+```bash
+make answer Q="how old was Bernini when he met the Pope?"
+make answer-dev          # every evals/dev pair, with the schema-valid tally
+```
+
+```
+Q: How old was Bernini when he was first presented to the Pope?
+   A: He was eight years old.
+      cite video 611 21.8s-47.8s
+```
+
+Four steps, and each is somewhere a wrong answer can come from:
+
+```
+retrieve  ->  render_context  ->  the model  ->  validate  ->  ground
+```
+
+| | |
+|---|---|
+| Contract | `schemas/answer.py` — `{answer, citations[{video_id, t_start, t_end}], abstain}`, the shape QA_SPEC §2 describes |
+| Prompt | `prompts/answer_v1.md`, versioned on disk, never inlined. Its `## System` / `## User` sections are the two messages; everything else in the file is commentary and is not sent |
+| Model | `openai/gpt-oss-120b` on Groq's free tier, `temperature = 0.0` — which removes the sampling variance and, measured, **not** the run-to-run variance |
+| Levers | `answer.arm`, `answer.model`, `answer.prompt`, `answer.temperature`, `answer.max_tokens` |
+
+### One declaration, two jobs
+
+`schemas.answer.json_schema()` renders the Pydantic model as the JSON Schema handed to the
+model in Groq's strict `response_format` (and Ollama's `format`), and
+`Answer.model_validate` checks the reply. Both come off one declaration, so the constraint on
+generation and the definition of valid cannot drift — the day they drift, the validator is the
+one that is wrong and nothing notices. Strict mode needs two things Pydantic's default output
+does not give: every property in `required` and no `$ref`, so the `Citation` definition is
+inlined and every object is closed.
+
+What the model refuses is a decision, not a type check. `extra="forbid"` — an unexpected key
+means the prompt has drifted, and dropping it hides that. Time ranges must run forward, the
+same rule `transcript.drop_impossible` applies on the way in. And `abstain` is coupled to
+`citations`: QA_SPEC §4 says a citation on a declined question is incorrect *regardless of
+what it says*, so a reply that declines and cites is not a near-miss to be repaired, it is
+incoherent.
+
+### Grounding: a valid citation can still point nowhere
+
+Validation proves a citation is well formed. It cannot prove it is real — `{"video_id":
+"611", "t_start": 412.0}` is a perfectly valid object for a question whose passages were all
+from video 701. So `ground()` runs **after** validation and matches every citation back to
+the retrieved set:
+
+| What it finds | What it does |
+|---|---|
+| No retrieved passage from that `video_id` | Drops it. The citation was invented |
+| A timestamp a few seconds off a retrieved passage | Snaps it onto that passage's exact range. Bad copying is not a new claim |
+| Nothing survives, and the reply was not already an abstention | The reply becomes an abstention |
+
+That last row only moves in the safe direction, and it is worth being explicit about why.
+QA_SPEC §2 needs at least one citation on the ground-truth video for an answerable question
+to count, so a reply whose every citation was invented is *already* scored incorrect and
+abstaining cannot lose a point that was available. On an unanswerable question it converts a
+hallucination into a correct abstention. And a citation that goes nowhere is worse for a user
+than no answer — which is the reason that is not about the scoring rule.
+
+Grounding runs after validation, never before, so the gate's schema-valid number is measured
+on what the model produced rather than on a repaired copy of it.
+
+## The VRAG-019 gate
+
+`tests/gates/gate_phase2a.py`. **Not** the Phase 2 exit gate — that is VRAG-021, it scores
+QA_SPEC §5 accuracy on `evals/heldout`, and it belongs to the Evaluator. This one asserts the
+two things that have to hold before that number means anything.
+
+```bash
+make gate-phase2a       # leakage first, then this gate alone
+```
+
+```
+schema-valid = 1.0000  (15/15 dev pairs)  threshold 1.00
+abstentions = 3/3 planted unanswerable pairs  threshold 3/3
+abstention rate: 1.0000 on 3 unanswerable pairs, 0.0833 on 12 answerable (1/12)  ceiling 0.25
+selectivity = 0.9167  (an abstain-everything module scores 0.0000)
+```
+
+**The refusal is the hard half.** `d013`–`d015` ask for a craft pad's sales figures, what
+Bernini was paid for *Apollo and Daphne*, and the name of Mike Ross's grandmother. All three
+are about videos that *are* indexed, so retrieval returns five confident, on-topic passages
+for each — the abstention has to come from reading them and noticing the fact is not there,
+not from an empty result. And a 120-billion-parameter model has read about Bernini and has
+seen *Suits*, so the corpus is not the only place an answer could come from. 3/3 is the number
+that says it did not come from anywhere else.
+
+**The third number is a rate, and that is a correction.** It was a per-pair assertion first
+— zero abstentions among the answerable pairs whose ground-truth moment was retrieved — and
+it passed, then failed the next run with nothing changed. Two findings came out of that, and
+both are why the check is now a rate with a ceiling.
+
+`openai/gpt-oss-120b` on Groq is **not reproducible at `temperature = 0.0`**. Six identical
+calls for `d001` — same code, same config, same prompt — returned 4 answers, 2 abstentions,
+and three different answer texts. The six lines are recorded in `config.toml` next to the
+lever. Temperature 0.0 pins the sampler, not the arithmetic, so a gate the supervisor re-runs
+and compares needs margin, and a threshold of exactly 0 on a 12-pair denominator has none.
+
+And `d001` is a pair no answerer can win. The line asked about is "I'm gonna graduate" at
+`t_ref = 30.0 s`, and **no retrieved passage contains it** — the chunk that does is outside
+the top 5. What satisfies the QA_SPEC §2 hit rule instead is a chunk from video 181 starting
+at `0.0 s` **whose entire text is `.`**, plus a lyric chunk at `51.0 s`; both are inside the
+±30 s tolerance, so the rule is met by passages that do not hold the answer. `make gate-phase1`
+duly scores `d001` a HIT at `dt = 30.0 s`, exactly on the boundary flagged in the VRAG-017
+standup. So abstaining is honest and answering would be a guess that §2 scores correct anyway
+— a per-pair rule demanding an answer would be demanding the guess.
+
+Two things follow, and neither is fixed here. The index holds a **text-empty chunk**, which
+`src/chunk.py` is supposed to drop and does not because `.` is a non-empty segment: that is a
+VRAG-014/017 finding, and fixing it would move a recorded Phase 1 number that belongs to
+another gate. And a timestamp-only hit rule cannot tell "the answer was retrieved" from "a
+passage near the right second was retrieved" — that is the Evaluator's contract to change, not
+the Builder's. Both are on the card.
+
+What the rate does measure is **selectivity**: the refusal fires on the questions the corpus
+cannot answer and not on the ones it can. Accuracy is a different number, it is QA_SPEC §5,
+and VRAG-021 scores it on `evals/heldout`.
+
+Three passes of the same code, config and prompt over all 15 dev pairs, to size the ceiling
+against that variance rather than guess it:
+
+| pass | schema-valid | abstain (unanswerable) | abstain (answerable) |
+|---|---|---|---|
+| 1 | 15/15 | 3/3 | 1/12 |
+| 2 | 15/15 | 3/3 | 1/12 |
+| 3 | 15/15 | 3/3 | 2/12 |
+
+`d001` is the only pair that moves. `d010` abstains in all three — it is the retrieval miss.
+Every other pair answers in all three. The two asserted numbers are stable; the third has a
+one-pair wobble, and the 0.25 ceiling (3 of 12) is one pair of margin over the worst pass.
+
+
+### The local arm is a different model, and its number is different
+
+`answer.arm = "ollama"` runs the same four steps with no key and no network. It is not a
+formality — it works, and it is what a run with no credential falls back to:
+
+```
+make answer Q="how old was Bernini when he met the Pope?"   # arm = "ollama"
+   A: Bernini was eight years old when he was first presented to the Pope.
+      cite video 611 21.8s-47.8s
+```
+
+But the README promise about re-measuring rather than assuming applies to it, so it was
+measured. `bartowski/Llama-3.2-3B-Instruct-GGUF:Q4_K_M` over all 15 dev pairs:
+
+| | `openai/gpt-oss-120b` (Groq) | `Llama-3.2-3B-Instruct` (local) |
+|---|---|---|
+| schema-valid | 15/15 | **12/15** |
+| abstained on the 3 unanswerable | 3/3 | **1/3** |
+| abstained on an answerable pair | 1/12 | 0/12 |
+| wall time, 15 questions | ~85 s | ~50 min |
+
+All three schema failures are **the same failure**, and it is the one rule in
+`schemas/answer.py` that is a judgement call rather than a type check:
+
+```
+d015  SCHEMA-INVALID  abstain is true but 1 citation(s) were returned
+      raw: {"answer": "The passage does not mention the name of Mike Ross's grandmother.",
+            "citations": [{"video_id": "701", "t_start": 0.0, "t_end": 0.0}], "abstain": true}
+```
+
+The 3B model declines correctly and then attaches a zero-timestamp citation anyway. Under
+QA_SPEC §4 that response is incorrect regardless of what the citation says, so the schema
+refuses it — which means two semantically correct refusals are counted as invalid rather than
+as abstentions. That is a **deliberate choice and a reversible one**: moving the
+`abstain ⇒ no citations` rule out of the schema and into `ground()`, which already normalises
+answers into abstentions, would score the local arm 15/15 with 3/3 abstentions and 2 repairs.
+It is not done here for one reason — it would make the VRAG-019 criterion (*schema-valid on
+100% of dev*) easier to pass, and the gate is measured on the configured arm, where the strict
+rule already scores 15/15. Flagged for review rather than decided quietly.
+
+The useful part is that the strict rule found a real behaviour difference between two models
+that both claim to honour a JSON schema. Constrained decoding gets the *shape* right in both;
+only the larger model gets the *coherence* right.
+
+
+| Precondition | Why it is not optional |
+|---|---|
+| `evals/dev ∩ evals/heldout = ∅` | `tests/gates/README` — no gate result counts until this holds |
+| dev has at least one planted unanswerable pair | Otherwise half the criterion cannot be measured at all |
+| The index covers all 4 dev videos | With nothing indexed, every abstention is free and 3/3 says nothing |
+| The prompt resolves to a file, and its sha256 is printed | Which prompt produced the number, recorded next to it |
+| The wire schema still carries the three fields the card names | If it does not, "schema-valid" is measuring something else |
+| Every returned citation names a retrieved passage | The property `ground()` exists for, asserted rather than assumed |
+
+15 hosted calls and 15 local embeddings, ~1.5 min, **$0.00** on the free tier — two orders of
+magnitude slower than the other gates in that directory.
 
 ## Rules that live in this repo
 
