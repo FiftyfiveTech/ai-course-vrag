@@ -1,4 +1,4 @@
-.PHONY: setup doctor corpus corpus-check corpus-pointers heldout-check leakage-check sample sample-real test gate gate-phase1 gate-phase2a demo chunks index index-dev probe answer answer-dev ask clean
+.PHONY: setup doctor corpus corpus-check corpus-pointers heldout-check leakage-check sample sample-real test gate gate-phase1 gate-phase2a demo chunks index index-dev probe answer answer-dev ask api openapi clean
 .DEFAULT_GOAL := help
 
 # The video the demo ingests, and the file the levers are read from. Both overridable:
@@ -14,6 +14,14 @@ Q ?= What two tools does the presenter say you need to make your first paper cut
 # Extra flags for `make ask`. --open also opens the page in a browser; left out of the
 # default so that a supervisor re-running the command gets a path and not a browser tab.
 ASK_FLAGS ?=
+
+# Where `make api` binds. Both default to the [api] section of config.toml when left empty,
+# so the levers stay in one place and these are the per-run override:
+#   make api PORT=9000
+#   make api HOST=0.0.0.0        # read the licence note in config.toml [api] first
+HOST ?=
+PORT ?=
+API_FLAGS ?=
 
 help:
 	@echo "make setup   create the venv and install deps (uv)"
@@ -37,6 +45,8 @@ help:
 	@echo "make answer-dev  answer every evals/dev pair; prints the schema-valid tally"
 	@echo "make gate-phase2a  the VRAG-019 gate: schema-valid on all of dev + abstention"
 	@echo "make ask     Q=\"...\"  THE DEMO: answer + a static player that jumps to the citation"
+	@echo "make api     the same answer over HTTP, for a frontend to call; /docs for the schema"
+	@echo "make openapi print the OpenAPI document and exit; no server, no network"
 
 setup:
 	@command -v uv >/dev/null || { echo "uv not installed: curl -LsSf https://astral.sh/uv/install.sh | sh"; exit 1; }
@@ -162,6 +172,34 @@ gate-phase1: leakage-check
 # (data/corpus/PROVENANCE.md). Both are a clickable timestamp; only one needs the media.
 ask:
 	uv run python -m src.ask "$(Q)" --config $(CONFIG) $(ASK_FLAGS)
+
+# THE DEMO, over HTTP. Same pipeline as `make ask` — retrieval, generation against the answer
+# schema, grounding, the padded seek — behind four endpoints, so a frontend can call it
+# instead of reading a file off disk:
+#
+#   GET  /health          is there an index, which arm, which config bytes
+#   POST /ask             {"question": "..."} -> answer + citations + provenance
+#   GET  /videos          which videos are indexed, and where each can be watched
+#   GET  /media/{id}      the local media file, range-served so a player can actually seek
+#
+# Interactive schema at /docs. Needs what `make ask` needs — the index (`make index-dev`) and,
+# on the groq arm, GROQ_API_KEY — but it starts without them and says so on /health, because a
+# server that refuses to boot cannot tell a frontend why.
+#
+# Binds to 127.0.0.1 by default and serves corpus media only off this disk. Both are the
+# licence, not caution: the corpus is pointers, not copies (data/corpus/PROVENANCE.md). Read
+# the [api] comments in config.toml before putting this on a public address.
+#
+# Add --reload while working on a handler: `make api API_FLAGS=--reload`.
+api:
+	uv run python -m src.api --config $(CONFIG) 		$(if $(HOST),--host $(HOST),) $(if $(PORT),--port $(PORT),) $(API_FLAGS)
+
+# The API contract as a file, for generating a frontend client or diffing what changed. No
+# server is started and nothing is called, so this works with no index and no key.
+# @, not echoed: this is meant to be piped (`make openapi > openapi.json`), and make's own
+# echo of the command line would be the first thing in the file and not valid JSON.
+openapi:
+	@uv run python -m src.api --config $(CONFIG) --print-openapi
 
 clean:
 	rm -rf .venv .pytest_cache **/__pycache__ .devids

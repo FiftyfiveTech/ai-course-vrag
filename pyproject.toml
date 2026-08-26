@@ -14,6 +14,8 @@ dependencies = [
     # in the tree as a chromadb dependency; declared here because src/answer.py imports it
     # directly and a transitive dependency is not a promise.
     "pydantic>=2.7",
+    "fastapi>=0.141.1",
+    "uvicorn[standard]>=0.52.4",
 ]
 
 [dependency-groups]

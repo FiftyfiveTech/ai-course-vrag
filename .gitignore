@@ -23,3 +23,7 @@ samples/
 # the cached chunk tables. Committing it would put transcript text - derived from Video-MME
 # media - in the repo, which is the same licence problem as committing the video.
 chroma/
+
+# VRAG API: the OpenAPI document is generated (`make openapi > openapi.json`) from
+# schemas/api.py, so committing it would give a frontend two contracts to disagree about.
+openapi.json

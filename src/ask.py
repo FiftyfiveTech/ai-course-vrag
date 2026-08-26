@@ -504,17 +504,13 @@ def _footer_html(
     """
     esc = html.escape
     fingerprint = cfg.fingerprint()
-    prompt_path = Path(cfg.get("answer.prompt"))
-    try:
-        prompt_sha = hashlib.sha256(prompt_path.read_bytes()).hexdigest()[:16]
-    except OSError:
-        prompt_sha = "unreadable"
+    prompt_path, prompt_sha = prompt_fingerprint(cfg)
     rows = [
         f"answer: {cfg.get('answer.arm')} · {cfg.get('answer.model')} · "
         f"temperature {cfg.get('answer.temperature')}",
         f"retrieval: {cfg.get('embed.model')} · top_k {cfg.get('retrieve.top_k')} · "
         f"{len(run.hits)} passage(s) retrieved",
-        f"prompt: {prompt_path.as_posix()} sha256:{prompt_sha} · "
+        f"prompt: {prompt_path.as_posix()} sha256:{prompt_sha[:16]} · "
         f"config: {fingerprint['path']} sha256:{fingerprint['sha256'][:16]}",
     ]
     if meter is not None:
@@ -530,6 +526,22 @@ def _footer_html(
     )
     body = "".join(f"<div>{esc(r)}</div>" for r in rows)
     return f"<footer>{body}</footer>"
+
+
+def prompt_fingerprint(cfg: Config) -> tuple[Path, str]:
+    """The prompt file behind a run, and a sha256 of its bytes.
+
+    Public because `src.api` puts the same pair in its `provenance` object: the page footer
+    and the JSON response have to name the same prompt, and computing the digest twice is how
+    they end up disagreeing about which one it was. `"unreadable"` rather than an exception —
+    a missing prompt file has already failed the run in `src.answer.load_prompt`, and if it
+    somehow has not, a provenance line is the wrong place to raise from.
+    """
+    path = Path(cfg.get("answer.prompt"))
+    try:
+        return path, hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return path, "unreadable"
 
 
 def _distinct_sources(cites: list[Cite]) -> list[Source]:
