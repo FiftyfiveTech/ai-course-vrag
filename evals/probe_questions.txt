@@ -1,0 +1,43 @@
+# Starter questions for `make probe`. Read by src/probe.py.
+#
+# THIS FILE IS NOT A LABEL SET. It has no video_id and no t_ref, nothing scores against it,
+# and it is not a third split. The two label sets are evals/dev (the Builder tunes there)
+# and evals/heldout (sealed, Evaluator only). Adding a question here cannot affect any gate.
+#
+# What it is for: reading results by eye. A recall number tells you how often the right
+# moment was somewhere in the top 5; it cannot tell you that the right passage keeps landing
+# at rank 4, or that a question about something the corpus never covers still comes back
+# looking confident. Those you have to look at.
+#
+# One question per line. Blank lines and # comments are skipped.
+# Only the 4 dev videos are indexed today: 181 (music video), 521 (paper cutting),
+# 611 (Bernini documentary), 701 (legal drama).
+
+# --- 611, documentary narration: the easy case, one speaker, dense facts
+Which of Bernini's sculptures shows a saint being burned alive on a griddle?
+What shape is St Peter's Square based on?
+How old was Bernini when he was first presented to the Pope?
+Who was the assistant that carved the fine details and never got credited?
+Why is Bernini's David different from Michelangelo's?
+
+# --- 521, single-presenter tutorial: procedural, lots of near-identical phrasing
+What tools do I need to start paper cutting?
+Where should a beginner start cutting a design?
+What does she do with the leftover scraps of paper?
+How hard should I press with the blade?
+Why does she leave the edges of the paper until last?
+
+# --- 701, drama dialogue: the hard case, 191 chunks, the answer is one line
+What allegation is made about where Mike Ross went to law school?
+What does Harvey say he specialises in?
+What happened to Mike's parents?
+
+# --- 181, music video: lyrics only, 6 chunks, near-exhaustive index
+What does the singer say she is going to do?
+
+# --- Nothing in the corpus answers these. The hits are the interesting part: watch the
+# --- distances. In-corpus best lands around 0.22-0.34, these around 0.47+, which is the
+# --- separation an abstention rule (VRAG-019) would have to lean on.
+How do I change the oil in a diesel engine?
+What is the capital of Peru?
+Who won the 2018 World Cup?

@@ -1,10 +1,11 @@
-.PHONY: setup doctor corpus corpus-check corpus-pointers heldout-check leakage-check sample sample-real test gate gate-phase1 demo chunks index index-dev clean
+.PHONY: setup doctor corpus corpus-check corpus-pointers heldout-check leakage-check sample sample-real test gate gate-phase1 demo chunks index index-dev probe clean
 .DEFAULT_GOAL := help
 
 # The video the demo ingests, and the file the levers are read from. Both overridable:
 #   make demo VIDEO=samples/181_8np5YKYx3sU.mp4
 VIDEO ?= samples/one.mp4
 CONFIG ?= config.toml
+QUESTIONS ?= evals/probe_questions.txt
 
 help:
 	@echo "make setup   create the venv and install deps (uv)"
@@ -23,6 +24,7 @@ help:
 	@echo "make index   chunk VIDEO and put its chunks in the Chroma collection"
 	@echo "make index-dev  fetch + index all 4 dev videos, then print the index contents"
 	@echo "make gate-phase1  just the Phase 1 gate: recall@5 on dev, threshold 0.80"
+	@echo "make probe   ask the index a file of plain questions and read the hits; no score"
 
 setup:
 	@command -v uv >/dev/null || { echo "uv not installed: curl -LsSf https://astral.sh/uv/install.sh | sh"; exit 1; }
@@ -101,6 +103,13 @@ index: $(VIDEO)
 # held-out ids outright.
 index-dev:
 	uv run python -m src.index --dev --config $(CONFIG)
+
+# Unlabelled questions in, hits out, no number. The gate says how often the right moment is
+# in the top 5; it cannot say that the right passage keeps landing at rank 4, or that a
+# question the corpus never covers still comes back looking confident. QUESTIONS takes a .txt
+# (one per line) or a .jsonl with a 'question' field; - reads stdin.
+probe:
+	uv run python -m src.probe $(QUESTIONS) --config $(CONFIG)
 
 # The Phase 1 exit gate on its own. Leakage first for the same reason `make gate` does it:
 # tests/gates/README says no gate result counts until dev and held-out are known disjoint.
