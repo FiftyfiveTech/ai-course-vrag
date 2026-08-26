@@ -153,16 +153,41 @@ max_upload_mb = 20.0
 split_search_s = 5.0
 
 [answer]
-# Answer model for VRAG-019/020/021.  Named by HF repo id.  Must be pulled in Ollama:
-#   ollama pull hf.co/Qwen/Qwen2.5-3B-Instruct-GGUF
+# Phase 2 answering — VRAG-019. Read by src/answer.py.
 #
-# Qwen2.5-3B-Instruct-GGUF has an official GGUF repo on HF, so the hf.co/ prefix
-# works without a token.  At 3 B params it runs on CPU in under a second per query.
+# Which runtime the generator runs on, the same shape transcript.arm uses:
 #
-# arm = "ollama"  →  local, no cost, requires the model to be pulled
-# Swap the model to tune quality vs. speed; the rate is 0.0 for all local models.
-arm = "ollama"
-model = "Qwen/Qwen2.5-3B-Instruct-GGUF"
+#   arm = "groq"     hosted, free tier, strict JSON schema at generation time
+#   arm = "ollama"   local, no key, no network, no rate limit
+#
+# groq is the default because the gate's number was measured on it. The local arm is not
+# decoration — it is what a run with no key or no network falls back to — but it is a
+# different model and its number has to be re-measured, not assumed. See the table in the
+# README.
+arm = "groq"
+
+# Model, by HF repo id. openai/gpt-oss-120b is the one model in this pipeline whose HF repo
+# id and Groq wire id are the same string; that is checked in src.answer._groq_wire_name and
+# not assumed, because whisper's are not the same and neither are nomic's.
+#
+# Groq serves exactly two models with a real HF repo id and a chat endpoint —
+# openai/gpt-oss-120b and openai/gpt-oss-20b. groq/compound* has no HF repo id and is out
+# (CLAUDE.md). Local alternative for arm = "ollama":
+#   model = "bartowski/Llama-3.2-3B-Instruct-GGUF:Q4_K_M"
+model = "openai/gpt-oss-120b"
+
+# The prompt, versioned on disk. Never inlined in code (README, prompts/). A prompt change
+# that moves a number goes in answer_v2.md next to the measurement, so the prompt that
+# produced a recorded result stays readable.
+prompt = "prompts/answer_v1.md"
+
+# 0.0 to remove the sampling variance we control.
+temperature = 0.0
+
+# Completion cap. Generous: an answer is one or two sentences plus at most a few citations,
+# so ~200 tokens is typical, but gpt-oss emits reasoning tokens before the JSON and a cap
+# that clips those returns a truncated object that fails validation.
+max_tokens = 1200
 
 [chunk]
 # Time-window chunking — VRAG-014. Read by src/chunk.py.

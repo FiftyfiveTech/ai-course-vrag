@@ -50,9 +50,15 @@ RATES: dict[str, tuple[str, float]] = {
     "nomic-ai/nomic-embed-text-v1.5": (_UNIT_TOKENS, 0.0),
     "nomic-ai/nomic-embed-text-v1.5-GGUF": (_UNIT_TOKENS, 0.0),
     "nomic-ai/nomic-embed-text-v1.5-GGUF:F16": (_UNIT_TOKENS, 0.0),
-    # Ollama local chat — no charge.
-    "meta-llama/Llama-3.2-3B-Instruct": (_UNIT_TOKENS, 0.0),
-    "Qwen/Qwen2.5-3B-Instruct-GGUF": (_UNIT_TOKENS, 0.0),
+    # Answer generation, VRAG-019. Groq free tier: $0.00 as we run it. The entry exists at
+    # 0.0 rather than being left out because RATES.get() defaults to $0.00 silently, and a
+    # model that is absent from this table is indistinguishable from a model that is free —
+    # so the day this moves to a paid tier, the fix is a number in this row instead of a
+    # hunt for which module makes the call.
+    "openai/gpt-oss-120b": (_UNIT_TOKENS, 0.0),
+    "openai/gpt-oss-20b": (_UNIT_TOKENS, 0.0),
+    # The local arm's generator (arm = "ollama"). Local, so $0.00 is the real rate.
+    "bartowski/Llama-3.2-3B-Instruct-GGUF:Q4_K_M": (_UNIT_TOKENS, 0.0),
 }
 
 

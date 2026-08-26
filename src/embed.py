@@ -128,30 +128,10 @@ def _embed_batch(texts: list[str], model: str, meter: Meter) -> list[list[float]
     return embeddings
 
 
-
-# Models that live in Ollama's own registry rather than as GGUF files on HF.
-# The HF repo id is the canonical name everywhere in this codebase; this dict
-# is the one place that knows the Ollama pull tag differs.
-_OLLAMA_NATIVE: dict[str, str] = {
-    # nomic-ai/nomic-embed-text-v1.5 on HF is PyTorch, not GGUF.
-    # Ollama ships it as a native model — `ollama pull nomic-embed-text`.
-    "nomic-ai/nomic-embed-text-v1.5": "nomic-embed-text",
-    # Llama 3.2 3B is a gated HF repo; Ollama's native copy needs no HF token.
-    "meta-llama/Llama-3.2-3B-Instruct": "llama3.2:3b",
-}
-
-
 def _hf_to_ollama_tag(hf_repo_id: str) -> str:
-    """Return the Ollama model tag for an HF repo id.
-
-    Most models: 'owner/repo' → 'hf.co/owner/repo' (pulled from HF as GGUF).
-    A small set have a native Ollama name that must be used instead — see
-    _OLLAMA_NATIVE above.
-    """
+    """'nomic-ai/nomic-embed-text-v1.5' → 'hf.co/nomic-ai/nomic-embed-text-v1.5'"""
     if hf_repo_id.startswith("hf.co/"):
         return hf_repo_id
-    if hf_repo_id in _OLLAMA_NATIVE:
-        return _OLLAMA_NATIVE[hf_repo_id]
     return f"hf.co/{hf_repo_id}"
 
 
