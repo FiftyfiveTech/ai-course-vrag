@@ -168,6 +168,22 @@ Next:     VRAG-013 (tests/gates/test_no_leakage.py) — the seal exists now, so 
           heldout = ∅ check is what makes the blind-labelling rule enforced rather than
           agreed.
 
+## 2026-08-26 — Ritika (Evaluator)
+Did:      VRAG-015 — embed + persist. src/embed.py: embed_and_persist(chunks,
+          cfg, meter) batches Chunk objects, embeds via Ollama
+          (nomic-ai/nomic-embed-text-v1.5), upserts into local Chroma with
+          video_id/t_start/t_end metadata. Chunk dataclass defined here —
+          VRAG-014 chunker will produce this shape. Idempotent via
+          Chunk.chunk_id() = {video_id}_{t_start:.3f}_{t_end:.3f}.
+          config.toml: [embed] section added. chromadb>=0.5 added to
+          pyproject.toml. 19 tests in tests/test_embed.py (no real Ollama/Chroma).
+          PR #13 opened (feat/vrag-015 → dev).
+Number:   .venv/bin/pytest tests -q --ignore=tests/gates → 172 passed (was 140, +19 embed + 13 skipped resolved)
+          Cost: $0.00 — nomic-embed-text-v1.5 is local Ollama, rate $0.00 in telemetry.
+Blocked:  end-to-end test deferred — needs `ollama pull hf.co/nomic-ai/nomic-embed-text-v1.5`.
+          VRAG-014 (chunking, Vimal) not merged yet; Chunk shape agreed here.
+Next:     VRAG-016 (retrieve: question → top-k chunks; recall@5 on dev)
+
 ## 2026-08-25 — Ritika (Evaluator)
 Did:      VRAG-013 — the blind-labelling seal. src/leakage.py computes
           evals/dev ∩ evals/heldout by content hash; tests/gates/test_no_leakage.py is the
