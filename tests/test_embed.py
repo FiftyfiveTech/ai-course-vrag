@@ -86,12 +86,23 @@ def test_chunk_id_unique_per_video():
 
 
 def test_hf_to_ollama_tag_adds_prefix():
-    assert _hf_to_ollama_tag("nomic-ai/nomic-embed-text-v1.5") == "hf.co/nomic-ai/nomic-embed-text-v1.5"
+    # A generic HF repo (no native Ollama entry) gets the hf.co/ prefix.
+    assert _hf_to_ollama_tag("some-org/some-model") == "hf.co/some-org/some-model"
 
 
 def test_hf_to_ollama_tag_already_prefixed():
-    tag = "hf.co/nomic-ai/nomic-embed-text-v1.5"
+    tag = "hf.co/some-org/some-model"
     assert _hf_to_ollama_tag(tag) == tag
+
+
+def test_hf_to_ollama_tag_native_nomic():
+    # nomic-embed-text-v1.5 HF repo is PyTorch, not GGUF — use Ollama's native name.
+    assert _hf_to_ollama_tag("nomic-ai/nomic-embed-text-v1.5") == "nomic-embed-text"
+
+
+def test_hf_to_ollama_tag_native_llama():
+    # Llama 3.2 3B is a gated HF repo — use Ollama's native name instead.
+    assert _hf_to_ollama_tag("meta-llama/Llama-3.2-3B-Instruct") == "llama3.2:3b"
 
 
 # ---------------------------------------------------------------------------

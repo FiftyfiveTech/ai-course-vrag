@@ -102,12 +102,15 @@ language = "en"
 
 [answer]
 # Answer model for VRAG-019/020/021.  Named by HF repo id.  Must be pulled in Ollama:
-#   ollama pull hf.co/meta-llama/Llama-3.2-3B-Instruct
+#   ollama pull hf.co/Qwen/Qwen2.5-3B-Instruct-GGUF
+#
+# Qwen2.5-3B-Instruct-GGUF has an official GGUF repo on HF, so the hf.co/ prefix
+# works without a token.  At 3 B params it runs on CPU in under a second per query.
 #
 # arm = "ollama"  →  local, no cost, requires the model to be pulled
 # Swap the model to tune quality vs. speed; the rate is 0.0 for all local models.
 arm = "ollama"
-model = "meta-llama/Llama-3.2-3B-Instruct"
+model = "Qwen/Qwen2.5-3B-Instruct-GGUF"
 
 [chunk]
 # Time-window chunking — VRAG-014. Read by src/chunk.py.

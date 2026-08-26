@@ -46,6 +46,7 @@ RATES: dict[str, tuple[str, float]] = {
     "nomic-ai/nomic-embed-text-v1.5": (_UNIT_TOKENS, 0.0),
     # Ollama local chat — no charge.
     "meta-llama/Llama-3.2-3B-Instruct": (_UNIT_TOKENS, 0.0),
+    "Qwen/Qwen2.5-3B-Instruct-GGUF": (_UNIT_TOKENS, 0.0),
 }
 
 
