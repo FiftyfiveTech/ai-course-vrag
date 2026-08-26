@@ -79,6 +79,11 @@ collection = "vrag"
 # raise it if Ollama is local and you have RAM to spare.
 batch_size = 32
 
+[retrieve]
+# Number of chunks to return per query.  The Phase 1 gate scores recall@5,
+# so this is the lever that controls that number.
+top_k = 5
+
 [transcript]
 # Which transcription arm to use.  "groq" hits the Groq API (GROQ_API_KEY required);
 # "ollama" runs the model locally via Ollama (no API key, but the model must be pulled).
