@@ -63,6 +63,10 @@ class AnswerError(Exception):
     """The answer path failed — message says which step and why."""
 
 
+class _GroqRateLimitError(AnswerError):
+    """Groq returned 429 — caller can fall back to the local arm."""
+
+
 @dataclass(frozen=True)
 class AnswerRun:
     """One question, and everything needed to explain what came back.
@@ -274,9 +278,18 @@ def _ask(system: str, user: str, cfg: Config, meter: Meter) -> tuple[str, int]:
     max_tokens = int(cfg.get("answer.max_tokens"))
 
     if arm == "groq":
-        return _groq_arm(system, user, model, temperature, max_tokens, meter)
+        ollama_model = cfg.get("answer.ollama_model")
+        try:
+            return _groq_arm(system, user, model, temperature, max_tokens, meter)
+        except _GroqRateLimitError as exc:
+            print(
+                f"WARNING: Groq rate limit hit — falling back to ollama ({ollama_model})",
+                file=__import__("sys").stderr,
+            )
+            return _ollama_arm(system, user, ollama_model, temperature, max_tokens, meter)
     if arm == "ollama":
-        return _ollama_arm(system, user, model, temperature, max_tokens, meter)
+        ollama_model = cfg.get("answer.ollama_model")
+        return _ollama_arm(system, user, ollama_model, temperature, max_tokens, meter)
     raise AnswerError(
         f"config.toml: answer.arm is {arm!r}, which is not an arm. Use 'groq' or 'ollama'."
     )
@@ -346,6 +359,9 @@ def _groq_arm(
             max_completion_tokens=max_tokens,
         )
     except Exception as exc:
+        msg = str(exc)
+        if "429" in msg or "rate_limit" in msg.lower() or "rate limit" in msg.lower():
+            raise _GroqRateLimitError(f"groq rate limit ({model}): {exc}") from exc
         raise AnswerError(f"groq arm failed ({model}): {exc}") from exc
 
     text = (response.choices[0].message.content or "").strip()
