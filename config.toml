@@ -185,3 +185,61 @@ window_s = 25.0
 # on dev video 181 at these settings — so embedding spend scales with this number. That trade
 # is the subject of VRAG-018; this is the lever to sweep.
 overlap_s = 8.0
+
+[answer]
+# Phase 2 answering — VRAG-019. Read by src/answer.py.
+#
+# Which runtime the generator runs on, the same shape transcript.arm uses:
+#
+#   arm = "groq"     hosted, free tier, strict JSON schema at generation time
+#   arm = "ollama"   local, no key, no network, no rate limit
+#
+# groq is the default because the gate's number was measured on it. The local arm is not
+# decoration — it is what a run with no key or no network falls back to — but it is a
+# different model and its number has to be re-measured, not assumed. See the table in the
+# README.
+arm = "groq"
+
+# Model, by HF repo id. openai/gpt-oss-120b is the one model in this pipeline whose HF repo
+# id and Groq wire id are the same string; that is checked in src.answer._groq_wire_name and
+# not assumed, because whisper's are not the same and neither are nomic's.
+#
+# Groq serves exactly two models with a real HF repo id and a chat endpoint —
+# openai/gpt-oss-120b and openai/gpt-oss-20b. groq/compound* has no HF repo id and is out
+# (CLAUDE.md). Local alternative for arm = "ollama":
+#   model = "bartowski/Llama-3.2-3B-Instruct-GGUF:Q4_K_M"
+model = "openai/gpt-oss-120b"
+
+# The prompt, versioned on disk. Never inlined in code (README, prompts/). A prompt change
+# that moves a number goes in answer_v2.md next to the measurement, so the prompt that
+# produced a recorded result stays readable.
+prompt = "prompts/answer_v1.md"
+
+# 0.0 to remove the sampling variance we control. It does NOT make the run reproducible, and
+# that was measured rather than assumed — the first thing this lever was believed to buy.
+# Six identical calls for dev pair d001, same code, same config, same prompt, temperature 0.0:
+#
+#   ANSWER  "She says she will take you back."
+#   ANSWER  "She says she will take you back."
+#   ABSTAIN
+#   ANSWER  "She says she will \"bang bang, all over you\"."
+#   ABSTAIN
+#   ANSWER  "She says she will \"bang bang all over you\"."
+#
+# 4 answers, 2 abstentions, and three different answer texts. The measurement is the six
+# lines above; the usual explanation for it — an MoE model served in continuous batches, where
+# the floating-point reduction depends on who else is in the batch — is not something this
+# repo has verified, so treat it as the reason to expect variance and not as a result.
+# temperature 0.0 pins the sampler, not the arithmetic. This caught a real gate
+# defect before review: gate_phase2a passed with a per-pair 'no false abstentions' threshold,
+# then failed the next run on d001 with nothing changed. A gate the supervisor re-runs has to
+# have margin against this, which is why the abstention check there is a rate with a ceiling
+# and not a per-pair assertion. Sampling above 0.0 is a lever to sweep only once there is a
+# number that wants it.
+temperature = 0.0
+
+# Completion cap. Generous: an answer is one or two sentences plus at most a few citations,
+# so ~200 tokens is typical, but gpt-oss emits reasoning tokens before the JSON and a cap
+# that clips those returns a truncated object that fails validation — which would show up as
+# "the model cannot follow the schema" when the real cause is the cap.
+max_tokens = 1200
