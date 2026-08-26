@@ -31,7 +31,7 @@ OLLAMA_TIMEOUT_S = 3.0
 # fails at the first real call, hours later - cheaper to catch here.
 CREDENTIALS = (
     ("HF_TOKEN", "hf_", "Hugging Face - model + dataset access"),
-    ("GROQ_API_KEY", "gsk_", "Groq free tier - hosted whisper arm"),
+    ("GROQ_API_KEY", "gsk_", "Groq free tier - hosted whisper arm (VRAG-008) and answer arm (VRAG-019)"),
     ("NVIDIA_API_KEY", "nvapi-", "NVIDIA NIM free tier - hosted fallback"),
 )
 
