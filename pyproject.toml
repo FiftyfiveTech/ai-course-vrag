@@ -19,6 +19,13 @@ dev = ["pytest>=8.0"]
 testpaths = ["tests"]
 # so tests can `from src.doctor import ...` without an editable install
 pythonpath = ["."]
+# tests/gates/README names the gates gate_phase0.py, gate_phase1.py, ... and pytest's default
+# python_files is "test_*.py *_test.py", so `pytest tests/gates` collected only
+# test_no_leakage.py and reported 24 passed having run no phase gate at all. Naming a file
+# explicitly (`pytest tests/gates/gate_phase0.py`) collects it regardless, which is how the
+# Phase 0 gate was ever seen to pass and why nothing caught this. A green `make gate` that
+# runs zero gates is the exact failure mode this repo keeps writing rules about.
+python_files = ["test_*.py", "gate_*.py"]
 
 [build-system]
 requires = ["hatchling"]

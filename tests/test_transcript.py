@@ -18,11 +18,16 @@ import pytest
 from src.transcript import (
     Segment,
     TranscriptError,
+    _groq_arm,
     _groq_model_name,
     _hf_to_ollama_tag,
     _parse_groq_segments,
     _parse_ollama_segments,
     _wav_duration_s,
+    drop_impossible,
+    offset_segments,
+    split_points,
+    split_wav,
     transcribe,
 )
 from src.telemetry import Meter
@@ -59,6 +64,7 @@ def cfg_groq(tmp_path):
     p = tmp_path / "config.toml"
     p.write_text(
         '[transcript]\narm = "groq"\nmodel = "openai/whisper-large-v3-turbo"\nlanguage = "en"\n'
+        "max_upload_mb = 20.0\nsplit_search_s = 5.0\n"
     )
     return load(p)
 
@@ -221,17 +227,351 @@ def test_transcribe_dispatches_to_ollama(cfg_ollama, meter, wav_file):
 def test_transcribe_passes_model_and_language_to_groq_arm(cfg_groq, meter, wav_file):
     with patch("src.transcript._groq_arm", return_value=[]) as mock_arm:
         transcribe(wav_file, cfg_groq, meter)
-    _, model, language, _ = mock_arm.call_args[0]
+    _, model, language, _, max_bytes, search_s = mock_arm.call_args[0]
     assert model == "openai/whisper-large-v3-turbo"
     assert language == "en"
+    # The two levers reach the arm as bytes and seconds, not as the MB in the file.
+    assert max_bytes == 20_000_000
+    assert search_s == 5.0
 
 
 def test_transcribe_converts_empty_language_to_none(tmp_path, meter, wav_file):
     from src.config import load
     p = tmp_path / "c.toml"
-    p.write_text('[transcript]\narm = "groq"\nmodel = "openai/whisper-large-v3-turbo"\nlanguage = ""\n')
+    p.write_text(
+        '[transcript]\narm = "groq"\nmodel = "openai/whisper-large-v3-turbo"\nlanguage = ""\n'
+        "max_upload_mb = 20.0\nsplit_search_s = 5.0\n"
+    )
     cfg = load(p)
     with patch("src.transcript._groq_arm", return_value=[]) as mock_arm:
         transcribe(wav_file, cfg, meter)
-    _, _, language, _ = mock_arm.call_args[0]
+    language = mock_arm.call_args[0][2]
     assert language is None
+
+
+# ---------------------------------------------------------------------------
+# Splitting oversized audio — VRAG-017
+#
+# Groq returns 413 above its upload cap, and ingest writes 16 kHz mono s16le at 32 kB/s, so
+# the arm tops out near 13 min of video per request. Two of the four dev videos are past it.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def groq_key(monkeypatch):
+    """The arm checks for a key before it uploads anything. Never the real one in a test."""
+    monkeypatch.setenv("GROQ_API_KEY", "gsk_test")
+
+
+def _wav(path: Path, samples: list[int], rate: int = 16000) -> Path:
+    """A mono 16-bit wav holding exactly these samples."""
+    with wave.open(str(path), "w") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(rate)
+        wf.writeframes(struct.pack(f"<{len(samples)}h", *samples))
+    return path
+
+
+def _reader(samples: list[int]):
+    """read_window(start, count) over an in-memory sample list."""
+
+    def read(start: int, count: int) -> bytes:
+        chunk = samples[start : start + count]
+        return struct.pack(f"<{len(chunk)}h", *chunk)
+
+    return read
+
+
+# --- split_points ---------------------------------------------------------------------
+
+
+def test_split_points_is_empty_when_the_file_already_fits():
+    assert split_points(1000, 16000, 2000, 1600, _reader([0] * 1000)) == []
+
+
+def test_split_points_never_exceeds_the_cap():
+    """Every piece must be under max_frames, or the split was pointless."""
+    n, cap = 10_000, 3_000
+    cuts = split_points(n, 100, cap, 0, _reader([0] * n))
+    bounds = [0, *cuts, n]
+    sizes = [bounds[i + 1] - bounds[i] for i in range(len(bounds) - 1)]
+    assert cuts, "a file 3x the cap has to be cut"
+    assert all(s <= cap for s in sizes), sizes
+
+
+def test_split_points_are_strictly_increasing():
+    n = 50_000
+    cuts = split_points(n, 100, 7_000, 0, _reader([0] * n))
+    assert cuts == sorted(set(cuts))
+    assert all(0 < c < n for c in cuts)
+
+
+def test_split_points_cuts_at_the_quiet_stretch_not_the_nominal_boundary():
+    """The whole point of the search window: land the cut in a pause, not mid-word.
+
+    Loud everywhere except a 0.2 s trough placed before the nominal cut. The cut should
+    move back onto the trough.
+    """
+    rate = 100  # 100 frames per "second" keeps the fixture small
+    # n under 2x the cap, so exactly one cut is needed and the assertion is unambiguous.
+    n = 900
+    cap = 500
+    quiet_at = 460  # inside the search window, before the nominal cut at 500
+    samples = [8000 if i % 2 == 0 else -8000 for i in range(n)]
+    for i in range(quiet_at, quiet_at + int(0.2 * rate)):
+        samples[i] = 0
+
+    (cut,) = split_points(n, rate, cap, int(1.0 * rate), _reader(samples))
+    assert cut == quiet_at, f"cut landed at {cut}, not on the silence at {quiet_at}"
+
+
+def test_split_points_falls_back_to_the_nominal_cut_without_a_search_window():
+    """search_frames=0 (non-mono or non-16-bit audio) must still produce valid cuts."""
+    n, cap = 900, 400
+    cuts = split_points(n, 100, cap, 0, _reader([5000] * n))
+    assert cuts == [400, 800]
+
+
+def test_split_points_terminates_on_uniform_silence():
+    """All-silent audio makes every window equally quiet. The loop still has to end."""
+    n, cap = 5_000, 1_000
+    cuts = split_points(n, 100, cap, 100, _reader([0] * n))
+    bounds = [0, *cuts, n]
+    assert all(bounds[i + 1] > bounds[i] for i in range(len(bounds) - 1))
+    assert bounds[-1] == n
+
+
+# --- split_wav -----------------------------------------------------------------------
+
+
+def test_split_wav_returns_the_original_when_it_fits(tmp_path):
+    """One code path for both cases: a small file comes back as a single piece at offset 0."""
+    src = _wav(tmp_path / "a.wav", [0] * 16000)
+    pieces = split_wav(src, 10_000_000, 5.0, tmp_path / "out")
+    assert pieces == [(0.0, src)]
+
+
+def test_split_wav_pieces_are_each_under_the_cap(tmp_path):
+    rate = 16000
+    src = _wav(tmp_path / "long.wav", [100] * (rate * 10), rate=rate)  # 10 s, 320 kB
+    cap = 100_000
+    pieces = split_wav(src, cap, 0.5, tmp_path / "out")
+    assert len(pieces) > 1
+    for _, path in pieces:
+        assert path.stat().st_size <= cap, f"{path.name} is {path.stat().st_size} bytes"
+
+
+def test_split_wav_offsets_are_the_piece_start_on_the_video_clock(tmp_path):
+    """The offset is what puts a piece's segment times back on the video clock."""
+    rate = 16000
+    src = _wav(tmp_path / "long.wav", [100] * (rate * 10), rate=rate)
+    pieces = split_wav(src, 100_000, 0.5, tmp_path / "out")
+
+    assert pieces[0][0] == 0.0
+    offsets = [o for o, _ in pieces]
+    assert offsets == sorted(offsets)
+    # Each offset must equal the total duration of everything before it, or the transcript
+    # develops a gap or an overlap at every boundary.
+    running = 0.0
+    for offset, path in pieces:
+        assert abs(offset - running) < 1e-6, f"offset {offset} != {running}"
+        with wave.open(str(path), "rb") as wf:
+            running += wf.getnframes() / wf.getframerate()
+
+
+def test_split_wav_loses_no_audio(tmp_path):
+    """Total frames across the pieces must equal the source. A dropped piece is dropped
+    speech, and nothing downstream would notice."""
+    rate = 16000
+    n = rate * 10
+    src = _wav(tmp_path / "long.wav", [i % 1000 for i in range(n)], rate=rate)
+    pieces = split_wav(src, 100_000, 0.5, tmp_path / "out")
+
+    total = 0
+    for _, path in pieces:
+        with wave.open(str(path), "rb") as wf:
+            total += wf.getnframes()
+    assert total == n
+
+
+def test_split_wav_preserves_the_audio_format(tmp_path):
+    """Whisper wants 16 kHz mono s16le. A piece written at another rate would transcribe
+    at the wrong speed and every timestamp in it would be wrong."""
+    rate = 16000
+    src = _wav(tmp_path / "long.wav", [100] * (rate * 10), rate=rate)
+    for _, path in split_wav(src, 100_000, 0.5, tmp_path / "out"):
+        with wave.open(str(path), "rb") as wf:
+            assert (wf.getnchannels(), wf.getsampwidth(), wf.getframerate()) == (1, 2, rate)
+
+
+# --- offset_segments -----------------------------------------------------------------
+
+
+def test_offset_segments_shifts_both_ends():
+    got = offset_segments([Segment(t_start=1.0, t_end=2.5, text="x")], 600.0)
+    assert got == [Segment(t_start=601.0, t_end=602.5, text="x")]
+
+
+def test_offset_segments_returns_the_input_unchanged_at_zero():
+    segs = [Segment(t_start=1.0, t_end=2.0, text="x")]
+    assert offset_segments(segs, 0.0) is segs
+
+
+def test_offset_segments_of_nothing_is_nothing():
+    assert offset_segments([], 42.0) == []
+
+
+# --- the arm end to end, with a fake Groq client --------------------------------------
+
+
+def test_groq_arm_stitches_pieces_onto_one_timeline(tmp_path, meter, groq_key):
+    """The bug this is here to catch: each piece reports times from its own zero, so
+    without the offset every piece's speech lands in the first few minutes of the video."""
+    rate = 16000
+    src = _wav(tmp_path / "long.wav", [100] * (rate * 10), rate=rate)
+
+    calls = []
+
+    def fake_create(**kwargs):
+        calls.append(kwargs["file"][0])
+        # Every piece claims speech at 1.0-2.0 s, relative to itself.
+        return SimpleNamespace(
+            segments=[{"start": 1.0, "end": 2.0, "text": f"piece{len(calls)}"}]
+        )
+
+    fake_client = MagicMock()
+    fake_client.audio.transcriptions.create.side_effect = fake_create
+
+    with patch("src.transcript._groq_client", return_value=fake_client):
+        segments = _groq_arm(
+            src, "openai/whisper-large-v3-turbo", "en", meter, 100_000, 0.5
+        )
+
+    assert len(calls) > 1, "a 320 kB wav against a 100 kB cap has to be split"
+    assert len(segments) == len(calls)
+    # Distinct, increasing start times — not every piece stacked at 1.0 s.
+    starts = [s.t_start for s in segments]
+    assert starts == sorted(starts)
+    assert len(set(starts)) == len(starts), starts
+    assert starts[0] == 1.0
+
+
+def test_groq_arm_meters_every_piece(tmp_path, meter, groq_key):
+    """Cost is per second of audio uploaded. Metering only the first piece would report a
+    fraction of the real spend on exactly the videos that cost the most."""
+    rate = 16000
+    src = _wav(tmp_path / "long.wav", [100] * (rate * 10), rate=rate)
+
+    fake_client = MagicMock()
+    fake_client.audio.transcriptions.create.return_value = SimpleNamespace(segments=[])
+
+    with patch("src.transcript._groq_client", return_value=fake_client):
+        _groq_arm(src, "openai/whisper-large-v3-turbo", "en", meter, 100_000, 0.5)
+
+    n_pieces = fake_client.audio.transcriptions.create.call_count
+    assert n_pieces > 1
+    assert len(meter._calls) == n_pieces
+    # 10 s of audio billed, whatever the piece count.
+    assert abs(sum(c.cost_usd for c in meter._calls) - 10.0 * (0.04 / 3600)) < 1e-9
+
+
+def test_groq_arm_does_not_split_a_file_that_fits(tmp_path, meter, groq_key):
+    rate = 16000
+    src = _wav(tmp_path / "short.wav", [100] * rate, rate=rate)
+
+    fake_client = MagicMock()
+    fake_client.audio.transcriptions.create.return_value = SimpleNamespace(
+        segments=[{"start": 0.0, "end": 1.0, "text": "hi"}]
+    )
+
+    with patch("src.transcript._groq_client", return_value=fake_client):
+        segments = _groq_arm(
+            src, "openai/whisper-large-v3-turbo", "en", meter, 10_000_000, 5.0
+        )
+
+    assert fake_client.audio.transcriptions.create.call_count == 1
+    assert segments == [Segment(t_start=0.0, t_end=1.0, text="hi")]
+
+
+# --- drop_impossible -----------------------------------------------------------------
+#
+# Found by running the split arm on dev video 701, not by reading it: whisper reported
+# t_end before t_start on a piece that opens mid-utterance, and the chunker refused the
+# whole 54-minute video over one segment.
+
+
+def test_drop_impossible_keeps_forward_ranges():
+    segs = [Segment(t_start=0.0, t_end=1.0, text="a"), Segment(t_start=1.0, t_end=3.0, text="b")]
+    assert drop_impossible(segs) == segs
+
+
+def test_drop_impossible_drops_a_backwards_range():
+    """The exact shape 701 produced: a segment ending before it starts."""
+    bad = Segment(t_start=2952.97, t_end=2946.75, text="Eric I don think")
+    good = Segment(t_start=2953.0, t_end=2955.0, text="real speech")
+    assert drop_impossible([bad, good]) == [good]
+
+
+def test_drop_impossible_keeps_a_zero_length_range():
+    """t_end == t_start is degenerate but forward, and the chunker accepts it."""
+    seg = Segment(t_start=5.0, t_end=5.0, text="x")
+    assert drop_impossible([seg]) == [seg]
+
+
+def test_drop_impossible_drops_a_negative_start():
+    seg = Segment(t_start=-1.0, t_end=2.0, text="x")
+    assert drop_impossible([seg]) == []
+
+
+def test_drop_impossible_reports_what_it_dropped(capsys, tmp_path):
+    bad = Segment(t_start=10.0, t_end=2.0, text="x")
+    drop_impossible([bad], tmp_path / "audio.wav")
+    out = capsys.readouterr().out
+    assert "dropped 1 of 1" in out and "audio.wav" in out
+
+
+def test_drop_impossible_is_silent_when_nothing_is_wrong(capsys):
+    drop_impossible([Segment(t_start=0.0, t_end=1.0, text="a")])
+    assert capsys.readouterr().out == ""
+
+
+def test_groq_arm_drops_an_impossible_segment_rather_than_failing(tmp_path, meter, groq_key):
+    """The arm has to hand the chunker something it will accept, or a whole video is lost."""
+    rate = 16000
+    src = _wav(tmp_path / "short.wav", [100] * rate, rate=rate)
+
+    fake_client = MagicMock()
+    fake_client.audio.transcriptions.create.return_value = SimpleNamespace(
+        segments=[
+            {"start": 6.2, "end": 0.0, "text": "opens mid-utterance"},
+            {"start": 6.2, "end": 8.0, "text": "fine"},
+        ]
+    )
+
+    with patch("src.transcript._groq_client", return_value=fake_client):
+        segments = _groq_arm(
+            src, "openai/whisper-large-v3-turbo", "en", meter, 10_000_000, 5.0
+        )
+
+    assert segments == [Segment(t_start=6.2, t_end=8.0, text="fine")]
+
+
+def test_groq_arm_returns_segments_in_time_order(tmp_path, meter, groq_key):
+    rate = 16000
+    src = _wav(tmp_path / "short.wav", [100] * rate, rate=rate)
+
+    fake_client = MagicMock()
+    fake_client.audio.transcriptions.create.return_value = SimpleNamespace(
+        segments=[
+            {"start": 5.0, "end": 6.0, "text": "second"},
+            {"start": 1.0, "end": 2.0, "text": "first"},
+        ]
+    )
+
+    with patch("src.transcript._groq_client", return_value=fake_client):
+        segments = _groq_arm(
+            src, "openai/whisper-large-v3-turbo", "en", meter, 10_000_000, 5.0
+        )
+
+    assert [s.text for s in segments] == ["first", "second"]

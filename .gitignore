@@ -18,3 +18,8 @@ data/corpus/media/
 # VRAG-005: sample videos are generated (`make sample`) or fetched from the manifest url
 # (`make sample-real`), never committed. Same licence reason as data/corpus/media/.
 samples/
+
+# VRAG-017: the Chroma vector store is a build artefact, rebuilt by `make index-dev` from
+# the cached chunk tables. Committing it would put transcript text - derived from Video-MME
+# media - in the repo, which is the same licence problem as committing the video.
+chroma/
