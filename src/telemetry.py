@@ -42,8 +42,14 @@ _UNIT_TOKENS = "tokens"
 RATES: dict[str, tuple[str, float]] = {
     # Groq: billed per second of audio.  $0.04 / audio-hour.
     "openai/whisper-large-v3-turbo": (_UNIT_AUDIO, 0.04 / 3600),
-    # Ollama local embedding — no charge.
+    # Ollama local embedding — no charge. Both ids: config.toml names the -GGUF variant
+    # (the only one Ollama can pull, VRAG-017) and the base id stays so a run recorded
+    # under the old name still resolves to a rate rather than falling through to the
+    # default. RATES.get() defaults to $0.00, so a missing key here is silent — which for
+    # a paid model would understate the bill.
     "nomic-ai/nomic-embed-text-v1.5": (_UNIT_TOKENS, 0.0),
+    "nomic-ai/nomic-embed-text-v1.5-GGUF": (_UNIT_TOKENS, 0.0),
+    "nomic-ai/nomic-embed-text-v1.5-GGUF:F16": (_UNIT_TOKENS, 0.0),
 }
 
 

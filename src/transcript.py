@@ -28,6 +28,7 @@ ollama: Uses the Ollama Python SDK.  No API key required.  The model must be
 from __future__ import annotations
 
 import os
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -69,7 +70,9 @@ def transcribe(wav: Path, cfg: Config, meter: Meter) -> list[Segment]:
     language = cfg.get("transcript.language") or None  # "" → None (auto-detect)
 
     if arm == "groq":
-        return _groq_arm(wav, model, language, meter)
+        max_bytes = int(float(cfg.get("transcript.max_upload_mb")) * 1_000_000)
+        search_s = float(cfg.get("transcript.split_search_s"))
+        return _groq_arm(wav, model, language, meter, max_bytes, search_s)
     if arm == "ollama":
         return _ollama_arm(wav, model, language, meter)
     raise ConfigError(
@@ -110,8 +113,136 @@ def _parse_groq_segments(response) -> list[Segment]:
     return segments
 
 
+def split_points(
+    n_frames: int, frame_rate: int, max_frames: int, search_frames: int, read_window
+) -> list[int]:
+    """Frame offsets to cut a too-long recording at, first cut first.
+
+    Cuts land no more than `max_frames` apart, so every piece is under the upload cap. Each
+    nominal cut is then moved to the quietest 200 ms within +/- `search_frames` of it, because
+    a cut through the middle of a word costs that word in both pieces: whisper hears half a
+    syllable at the end of one and half at the start of the next, and the segment timings
+    either side drift to cover it.
+
+    `read_window(start, count)` returns that many frames of mono 16-bit PCM as a bytes-like
+    object. Passed in rather than reading the file here so this is testable without a wav.
+    """
+    if n_frames <= max_frames:
+        return []
+
+    quiet_frames = max(1, int(0.2 * frame_rate))
+    cuts: list[int] = []
+    pos = 0
+    while n_frames - pos > max_frames:
+        nominal = pos + max_frames
+        # Never search past the cap, or the piece before the cut would exceed it.
+        lo = max(pos + quiet_frames, nominal - search_frames)
+        hi = min(n_frames - quiet_frames, nominal)
+        cut = _quietest_frame(lo, hi, quiet_frames, read_window) if hi > lo else nominal
+        # Monotonic and strictly forward, whatever the audio looks like: a cut at or before
+        # the previous one would emit an empty piece and loop forever.
+        cut = max(cut, pos + 1)
+        cuts.append(cut)
+        pos = cut
+    return cuts
+
+
+def _quietest_frame(lo: int, hi: int, window: int, read_window) -> int:
+    """Start frame of the quietest `window` frames in [lo, hi). Mean |amplitude|.
+
+    One pass: a prefix sum over the search region, then the minimum window sum over it.
+    """
+    import array
+
+    count = hi - lo + window
+    raw = read_window(lo, count)
+    samples = array.array("h")
+    samples.frombytes(raw[: (len(raw) // 2) * 2])
+    if len(samples) < window + 1:
+        return lo
+
+    prefix = [0] * (len(samples) + 1)
+    for i, v in enumerate(samples):
+        prefix[i + 1] = prefix[i] + (v if v >= 0 else -v)
+
+    best_sum, best_at = None, lo
+    last = len(samples) - window
+    for i in range(last + 1):
+        total = prefix[i + window] - prefix[i]
+        if best_sum is None or total < best_sum:
+            best_sum, best_at = total, lo + i
+    return best_at
+
+
+def split_wav(
+    wav: Path, max_bytes: int, search_s: float, out_dir: Path
+) -> list[tuple[float, Path]]:
+    """Cut wav into pieces under max_bytes. Returns (offset seconds, piece path) pairs.
+
+    Returns a single pair pointing at the original file when it already fits, so the caller
+    has one code path either way. The offset is what puts each piece's segment times back on
+    the video clock - a piece transcribed on its own reports times from its own zero.
+    """
+    import wave
+
+    with wave.open(str(wav), "rb") as src:
+        params = src.getparams()
+        n_frames = src.getnframes()
+        frame_rate = src.getframerate()
+        frame_bytes = src.getsampwidth() * src.getnchannels()
+
+        header_slack = 4096  # wav header plus multipart overhead on the request
+        max_frames = max(1, (max_bytes - header_slack) // frame_bytes)
+        if n_frames <= max_frames:
+            return [(0.0, wav)]
+
+        def read_window(start: int, count: int) -> bytes:
+            src.setpos(min(start, n_frames))
+            return src.readframes(min(count, n_frames - min(start, n_frames)))
+
+        searchable = src.getsampwidth() == 2 and src.getnchannels() == 1
+        cuts = split_points(
+            n_frames,
+            frame_rate,
+            max_frames,
+            int(search_s * frame_rate) if searchable else 0,
+            read_window,
+        )
+
+        out_dir.mkdir(parents=True, exist_ok=True)
+        pieces: list[tuple[float, Path]] = []
+        bounds = [0, *cuts, n_frames]
+        for i in range(len(bounds) - 1):
+            start, end = bounds[i], bounds[i + 1]
+            src.setpos(start)
+            data = src.readframes(end - start)
+            path = out_dir / f"{wav.stem}.part{i:03d}.wav"
+            with wave.open(str(path), "wb") as dst:
+                dst.setnchannels(params.nchannels)
+                dst.setsampwidth(params.sampwidth)
+                dst.setframerate(params.framerate)
+                dst.writeframes(data)
+            pieces.append((start / frame_rate, path))
+    return pieces
+
+
+def offset_segments(segments: list[Segment], offset_s: float) -> list[Segment]:
+    """Shift a piece's segment times onto the video clock."""
+    if not offset_s:
+        return segments
+    return [
+        Segment(t_start=s.t_start + offset_s, t_end=s.t_end + offset_s, text=s.text)
+        for s in segments
+    ]
+
+
 def _groq_arm(
-    wav: Path, model: str, language: str | None, meter: Meter
+    wav: Path,
+    model: str,
+    language: str | None,
+    meter: Meter,
+    max_bytes: int,
+    search_s: float,
 ) -> list[Segment]:
     try:
         from groq import Groq
@@ -127,9 +258,77 @@ def _groq_arm(
             "or the process environment."
         )
 
-    client = Groq(api_key=api_key)
+    client = _groq_client(api_key)
     groq_model = _groq_model_name(model)
 
+    with tempfile.TemporaryDirectory(prefix="vrag-asr-") as tmp:
+        try:
+            pieces = split_wav(wav, max_bytes, search_s, Path(tmp))
+        except Exception as exc:
+            raise TranscriptError(
+                f"groq arm could not split {wav} under {max_bytes} bytes: {exc}"
+            ) from exc
+
+        if len(pieces) > 1:
+            total_s = _wav_duration_s(wav)
+            print(
+                f"  splitting {wav.name} ({wav.stat().st_size / 1e6:.1f} MB, "
+                f"{total_s / 60:.1f} min) into {len(pieces)} piece(s) under "
+                f"{max_bytes / 1e6:.0f} MB"
+            )
+
+        segments: list[Segment] = []
+        for offset_s, piece in pieces:
+            raw = _groq_one(client, piece, groq_model, language, model, meter)
+            segments.extend(offset_segments(raw, offset_s))
+
+    # Pieces are transcribed in order and each is shifted onto the video clock, but the sort
+    # is what the contract promises and it costs nothing to keep it true here.
+    return sorted(drop_impossible(segments, wav), key=lambda s: s.t_start)
+
+
+def drop_impossible(segments: list[Segment], wav: Path | None = None) -> list[Segment]:
+    """Discard segments whose range does not run forward, and say how many.
+
+    Whisper occasionally reports t_end before t_start, and it does it at the start of an
+    audio file - a piece that opens mid-utterance gets a segment starting at 6.2 s and
+    ending at 0.0. Splitting a long video makes several such openings instead of one, which
+    is how this surfaced: dev video 701 produced
+
+        segment has an impossible time range (t_start=2952.97, t_end=2946.75): 'Eric I don think'
+
+    and the chunker refused the whole video rather than index one bad range. Repairing the
+    duration would be inventing it. A segment whose timestamp does not run forward cannot be
+    cited, and a citation is the only thing this pipeline produces, so it is dropped and
+    counted where somebody can see it.
+    """
+    good = [s for s in segments if s.t_end >= s.t_start and s.t_start >= 0]
+    dropped = len(segments) - len(good)
+    if dropped:
+        where = f" in {wav.name}" if wav is not None else ""
+        print(
+            f"  dropped {dropped} of {len(segments)} segment(s){where} whose time range "
+            f"does not run forward - unciteable, see transcript.drop_impossible"
+        )
+    return good
+
+
+def _groq_client(api_key: str):
+    """The Groq client. One seam, so a test can drive the arm without a network call."""
+    from groq import Groq
+
+    return Groq(api_key=api_key)
+
+
+def _groq_one(
+    client,
+    wav: Path,
+    groq_model: str,
+    language: str | None,
+    model: str,
+    meter: Meter,
+) -> list[Segment]:
+    """One upload. Times come back relative to this file's own zero."""
     try:
         with wav.open("rb") as fh:
             audio_s = _wav_duration_s(wav)

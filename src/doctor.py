@@ -42,7 +42,7 @@ OPTIONAL_CREDENTIALS = (
 
 # Substring match - Ollama tags carry a registry prefix and a quant suffix.
 EXPECTED_OLLAMA_MODELS = (
-    ("nomic-embed-text", "embeddings for VRAG-015; HF repo id nomic-ai/nomic-embed-text-v1.5"),
+    ("nomic-embed-text", "embeddings for VRAG-015; ollama pull hf.co/nomic-ai/nomic-embed-text-v1.5-GGUF:F16 - the untagged pull gets Q2_K, which halves recall@5"),
 )
 
 
