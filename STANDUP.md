@@ -576,3 +576,65 @@ Blocked:  nothing. Three things flagged for review, none blocking:
           question with "first" / "before" / "at the start" gets an unordered list. Untested
           idea, no number behind it, so it is not in - but it is the obvious Phase 2 lever.
 Next:     VRAG-020, whatever the board has after this one. The answer path is in place for it.
+
+## 2026-08-26 — Vimal (Builder) — VRAG-020
+Did:      THE DEMO. Question in, answer out, and a citation you can click.
+            src/ask.py            answer -> Cite[] -> one static HTML page + the terminal report
+            tests/test_ask.py     41 tests, no network / no model / no index / no media
+            config.toml [ask]     pad_s = 5.0
+            Makefile              `make ask Q="..."`, `ASK_FLAGS=--open` to open a browser
+          src/ask.py decides nothing. VRAG-019 already retrieves, generates against
+          schemas/answer.py and grounds every citation onto a passage that was really
+          retrieved; this renders that and makes it clickable. A bug in the answer belongs to
+          VRAG-019, a bug in the link belongs here.
+          Measured, on the live pipeline (index-dev, groq arm, openai/gpt-oss-120b):
+            $ make ask Q="How old was Bernini when he first met the Pope?"
+              A: He was eight years old.
+              [1] video 611 - 0:21-0:47
+                  play  file:///.../runs/ask/ae7aa48d-...html#c1
+                  file  samples/611_H8fGd3fCJbg.mp4
+                  source  https://www.youtube.com/watch?v=H8fGd3fCJbg&t=16s
+                  "At the age of eight, Gian Lorenzo Bernini, the child prodigy, was
+                   presented to the Pope, who prophetically announced that the child would be
+                   the Michelangelo of"
+              2 model call(s), 1.00s, $0.0000
+          Opened the page in Chrome, and opened it again at #c2 on a two-citation fixture: the
+          hash deep link seeks the shared player to the second citation's second and highlights
+          it. That is the whole card - the timestamp is clickable, not printed.
+          408 unit tests pass, 51 gate checks pass (`make gate`, exit 0). Nothing here is
+          scored, and deliberately: VRAG-021 on evals/heldout is the number for Phase 2.
+Learned:  Three, and two of them would have shipped a demo that looks right and is not.
+          (1) POINTERS, NOT COPIES IS A UI PROBLEM, not just a licence one. No video is in the
+          repo and none can be (Video-MME terms, .gitignore blocks samples/), so on a clean
+          clone `<video src="../../samples/611_....mp4">` is a black box with no error. The page
+          therefore has two players: the local file when samples/ has it, and a link to the
+          manifest url with &t= when it does not. Same citation, same second, different copy.
+          A video_id with neither gets plain text - the one thing never rendered is a control
+          that LOOKS clickable and is not.
+          (2) YOUTUBE IGNORES A FRACTIONAL t. `&t=15.7s` opens the video at 0, which reads
+          exactly like a broken citation, so deep_link() floors to whole seconds. Floors, not
+          rounds: rounding up can land after the first word of the sentence being cited.
+          (3) A BACKSLASH IN AN href IS AN ESCAPE, NOT A SEPARATOR. Path("samples/x.mp4") on
+          Windows stringifies with a backslash and the player silently shows nothing - no
+          console error, no broken-image marker. relative_src() goes through os.path.relpath
+          and .as_posix(), and a test walks the relative path back to the file to prove it
+          resolves. Both (2) and (3) are pinned by tests, because neither fails loudly.
+          Also: ask.pad_s = 5.0 seeks 5 s BEFORE the citation. A citation names a chunk
+          boundary and a chunk boundary is a grid line on the video clock, not where the
+          sentence starts - landing on it exactly drops the viewer mid-word about as often as
+          not, and the demo then reads as an off-by-a-second citation when the citation is
+          right. Viewing lever only: nothing measured reads it, and 5 s is well inside the
+          +/-30 s QA_SPEC sec.2 tolerance the citation is scored on.
+          `make ask` refuses outright on an empty index instead of answering from nothing. With
+          nothing indexed every question abstains, the page renders, and the demo would look
+          like it works while proving nothing - the same failure mode as a green `make gate`
+          that runs zero gates.
+Blocked:  nothing. One thing flagged, not blocking:
+          the page is a demo, not a UI - one question per run, one file per question, no
+          history and no way to ask the next question from inside it. That is a deliberate
+          scope call (the card says "question in -> answer + clickable timestamp out"), but if
+          anyone is going to show this to a room, a two-line index of runs/ask/ is the cheapest
+          thing that would make it feel like a product. Not in, no number behind it.
+Next:     VRAG-018 (concept primer + coach page) or VRAG-009 (failure tests: no audio track,
+          zero-length, unreadable codec) - VRAG-009 has been the deferred one for four sessions
+          now and is the only Phase 0 card still open.

@@ -243,3 +243,17 @@ temperature = 0.0
 # that clips those returns a truncated object that fails validation — which would show up as
 # "the model cannot follow the schema" when the real cause is the cap.
 max_tokens = 1200
+
+[ask]
+# THE DEMO — VRAG-020. Read by src/ask.py.
+#
+# How many seconds before a citation's t_start the player is seeked to. A citation names the
+# chunk boundary, and a chunk boundary is a grid line on the video clock (see [chunk]) — it
+# is not where the sentence being cited begins. Landing exactly on it drops the viewer into
+# the middle of a word about as often as not, and the demo then reads as an off-by-a-second
+# citation when the citation is right.
+#
+# 5.0 is under the ±30 s QA_SPEC §2 tolerance by a wide margin, so the padded start is still
+# inside the window the citation is scored on. It is a viewing lever only: nothing measured
+# reads it, and the numbers on the card are unaffected by changing it.
+pad_s = 5.0
