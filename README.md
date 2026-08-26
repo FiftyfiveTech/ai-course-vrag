@@ -25,6 +25,7 @@ other person as a collaborator with push access.
 | `data/corpus/` | The 10-video pilot corpus: **pointers only**, never media. `manifest.json` + `PROVENANCE.md` (licence, provenance, how the split was chosen). |
 | `prompts/` | Versioned prompt files. `answer_v1.md` is the Phase 2 answering prompt; its `## System` / `## User` sections are the messages, the rest is commentary. Never inline a prompt in code. |
 | `schemas/` | Pydantic models. `answer.py` is the `{answer, citations[], abstain}` contract — one declaration, used both to constrain generation and to validate the reply. `api.py` is the HTTP contract `make api` serves and `/docs` renders. |
+| `web/` | The frontend `make api` serves at `/` — three static files, no build step. Same origin as the API, so a citation's root-relative `stream_url` resolves and no CORS entry is needed. |
 | `evals/dev/` | **Builder** tunes here. 15 cases (`dev_v1.jsonl`): 12 answerable, 3 not. Written from the transcripts, not from watching — see [evals/dev/README.md](evals/dev/README.md) before quoting a number from them. |
 | `evals/heldout/` | **Evaluator** only. Sealed Wednesday, tagged `heldout-v1`. The Builder never reads it. |
 | `evals/QA_SPEC.md` | What a correct citation is (±30 s), what counts as unanswerable, how the gate scores. |
@@ -593,6 +594,74 @@ loopback bind means "serving" it reaches this machine and no other — and `api.
 an enumerated list rather than `*`, because a wildcard on a server that streams that media
 lets any page in any tab read it. `make api HOST=0.0.0.0` is available, and it is a decision
 about the licence rather than about convenience.
+
+## The frontend: `web/`
+
+`make api` also serves the UI. Open <http://127.0.0.1:8000> and ask.
+
+```
+55  fiftyfive | VRAG                    ● 546 chunks · 5 videos · ollama   config.toml · 75805be…
+
+                                     What two tools do I need to make my first paper cut?
+  You need a self-healing cutting mat and a scalpel.
+
+  CITATIONS
+  ┌ 1 · video 521 · 0:13–0:42 ─────────────────────────────────────────────────────┐
+  │ “Adventures in Paper Cutting. Today I'm going to take you through one of the…”  │
+  └────────────────────────────────────────────────────────────────────────────────┘
+  ┌ 2 · video 521 · 0:00–0:31 ──────────────────────────────────────────────────── ┐
+  ...
+  [ ▶ 0:08 / 11:53 ────────────────────────── ]   video 521 — click a citation to jump
+
+  arm ollama · bartowski/…   retrieved 5/5   latency 13.965s   cost $0.000000   config 75805be4beca
+```
+
+Three static files — `web/index.html`, `web/styles.css`, `web/app.js` — with no build step and
+no second package manager, because `make setup` has to work from a clean clone and a toolchain
+that has to be installed first would make that a lie. Editing `web/app.js` and reloading the
+tab is the whole edit loop.
+
+Served by the API itself rather than by a dev server on another port, which is not a shortcut:
+
+* **Same origin, so CORS does not enter into it.** A page on `:5173` calling `:8000` needs an
+  `api.cors_origins` entry, and the symptom of a missing one is an error in a console nobody
+  has open. A page served from `/` needs none.
+* **Root-relative urls resolve.** A citation's `stream_url` is `/media/611`, deliberately not
+  absolute (`src/api.py`), so a browser resolves it against wherever it got the JSON from —
+  the address already known to work, including behind a proxy or a tunnel.
+
+### What the page shows, and why each part is there
+
+| On screen | Comes from | Why |
+|---|---|---|
+| The status pill | `GET /health` on load | An empty index does not fail — every question abstains, and a question box over one is a working demo of nothing. The pill says `index empty` before you type, and its tooltip names the command to run. |
+| The answer bubble | `answer` | Revealed a word at a time. The API does not stream — `ask()` returns one whole object — so this is a reveal of text that has fully arrived, not a fake token stream. Every word is in the DOM from the first frame and only opacity animates, so `prefers-reduced-motion` loses the animation and not the answer. |
+| Three dots | the wait | Answering makes an embed call and a hosted completion and takes seconds. The wait is real; this is what says so. |
+| Citation cards | `citations[]` | `label` and the passage, and a card is rendered **as what it can actually do**: `stream_url` → a button that seeks the player, `source_url` only → a link that leaves, neither → plain text saying there is nowhere to play it. A dead control that looks live is the failure worth avoiding. |
+| The player | `GET /media/{id}` | One per distinct cited video that is on this host. Clicking a citation seeks it to `seek_s` — the padded second, not the chunk boundary. |
+| The chips | `provenance` + `spend` | Arm, model, retrieved/top_k, latency, cost, and the config sha256. An answer with no provenance cannot be re-run or disagreed with, and that does not stop being true because the transport changed. `repairs` get their own chip: a repaired answer must not look identical to a clean one. |
+
+The three outcomes stay distinguishable on screen, because the API deliberately makes them all
+`200`. An **abstention** is styled as a quieter answer and never as an error — QA_SPEC §4, it
+is the system correctly declining — with a note saying why there is nothing to cite. A reply
+that **failed schema validation** gets a warning edge and prints `error` verbatim; it is the
+number VRAG-019 is measured on and hiding it would be the point. A **429** prints the
+provider's own message and the `Retry-After` as a wait.
+
+`/?q=…` asks on load, so a question is a link someone can send — and it is what makes the
+render checkable by a headless browser rather than by someone clicking.
+
+Nothing on the page is built with `innerHTML`. Every string that reaches it — the answer, a
+passage, a provider's error — came from a model or from the network, and `textContent` is the
+only version of this that is not one bad passage away from script injection.
+
+`--brand` in `web/styles.css` is the only brand colour in the file; everything tinted derives
+from it, so swapping that hex is the whole rebrand. The 55 mark is CSS and type rather than an
+image, because there is no logo asset in this repo and committing an invented one would be
+worse than a wordmark that is obviously type.
+
+A checkout without `web/` is not broken — `GET /` falls back to redirecting to `/docs`, the way
+it did before there was a UI, and `tests/test_api.py` pins both branches.
 
 ## Rules that live in this repo
 
