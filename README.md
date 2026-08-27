@@ -335,6 +335,22 @@ one-pair wobble, and the 0.25 ceiling (3 of 12) is one pair of margin over the w
 
 ### The local arm is a different model, and its number is different
 
+**`answer.arm = "groq"` is the default.** The hosted arm is where the gate's number was
+measured, and it is 21× faster on the phase that dominates a run — same question, same index,
+same code, only the lever changed, measured with `make latency`:
+
+| `answer.arm` | `answer.generate` | share of run | whole run |
+|---|---|---|---|
+| `"groq"` | **1.166s** | 41.0% | 2.8s |
+| `"ollama"` | **24.657s** | 92.5% | 26.6s |
+
+Nothing else in the pipeline adds up to two seconds, so that line is the whole latency story.
+It sat on `"ollama"` for a while after a day when Groq's free tier ran out of tokens, with the
+config comment still claiming groq — which is how a leftover survives: the value moved and the
+reason it moved was never written down. Choosing groq does not mean a rate limit stops the
+demo; `src.answer._ask` falls back to `answer.ollama_model` automatically on a 429, so the
+fast path is the default and the slow one is the safety net.
+
 `answer.arm = "ollama"` runs the same four steps with no key and no network. It is not a
 formality — it works, and it is what a run with no credential falls back to:
 
@@ -516,24 +532,41 @@ curl -s localhost:8000/ask -H 'content-type: application/json' \
     }
   ],
   "repairs": [],
-  "spend": { "calls": 2, "latency_s": 17.762, "cost_usd": 0.0 },
+  "spend": {
+    "calls": 2,
+    "latency_s": 1.424,
+    "wall_s": 1.887,
+    "cost_usd": 0.0,
+    "phases": [
+      { "phase": "answer.generate", "calls": 1, "seconds": 1.3148, "model": "openai/gpt-oss-120b" },
+      { "phase": "retrieve.embed",  "calls": 1, "seconds": 0.1094, "model": "nomic-ai/nomic-embed-text-v1.5-GGUF:F16" },
+      { "phase": "retrieve.query",  "calls": 1, "seconds": 0.0217, "model": null },
+      { "phase": "ask.cites",       "calls": 1, "seconds": 0.0012, "model": null },
+      { "phase": "answer.prompt",   "calls": 1, "seconds": 0.0008, "model": null },
+      { "phase": "answer.ground",   "calls": 1, "seconds": 0.0001, "model": null }
+    ]
+  },
   "provenance": {
-    "arm": "ollama",
-    "answer_model": "bartowski/Llama-3.2-3B-Instruct-GGUF:Q4_K_M",
+    "arm": "groq",
+    "answer_model": "openai/gpt-oss-120b",
     "embed_model": "nomic-ai/nomic-embed-text-v1.5-GGUF:F16",
     "top_k": 5, "retrieved": 5,
     "prompt": "prompts/answer_v1.md",
     "prompt_sha256": "f31f34caf6d695073c99f9b5d77cb483104eb9d6f7e93e16634e0c114cdd86e0",
     "config": "config.toml",
-    "config_sha256": "…"
+    "config_sha256": "c32d4438…"
   }
 }
 ```
 
-That response is real output, and it is the **local arm** because the hosted arm's free tier
-was out of tokens for the day when it was captured (see the 429 note below); the `provenance`
-block is there precisely so a pasted response says which arm produced it. One citation of the
-four is shown and its passage is elided; nothing else is edited.
+That response is real output on the default arm. One citation of the four is shown and its
+passage is elided; the config sha is truncated. Nothing else is edited.
+
+`spend` reports two clocks on purpose. `latency_s` is model time — what the cost meter has
+always counted — and `wall_s` is what the request actually took; `phases` says where the
+difference went. On a *cold* process those diverge badly (the first `retrieve.query` is ~1.4s
+of Chroma start-up against 0.0217s here), which is the whole subject of
+[`make latency`](#where-the-time-went-make-latency).
 
 ### Three outcomes, and none of them is a 5xx
 

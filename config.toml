@@ -194,11 +194,27 @@ overlap_s = 8.0
 #   arm = "groq"     hosted, free tier, strict JSON schema at generation time
 #   arm = "ollama"   local, no key, no network, no rate limit
 #
-# groq is the default because the gate's number was measured on it. The local arm is not
-# decoration — it is what a run with no key or no network falls back to — but it is a
-# different model and its number has to be re-measured, not assumed. See the table in the
-# README.
-arm = "ollama"
+# groq is the default, for two measured reasons.
+#
+# The gate's number was measured on it, and the local arm is a different model whose number
+# has to be re-measured rather than assumed (the table in the README). And it is 21× faster
+# on the phase that dominates a run — same question, same index, same code, only this lever
+# changed, measured with `make latency`:
+#
+#   arm = "groq"     answer.generate  1.166s   41.0% of a  2.8s run
+#   arm = "ollama"   answer.generate 24.657s   92.5% of a 26.6s run
+#
+# Nothing else in the pipeline adds up to two seconds, so this line is the whole latency
+# story. It had been left on "ollama" after a day when Groq's free tier ran out of tokens,
+# with this comment still claiming groq — which is how a leftover survives: the value moved
+# and the reason it moved did not get written down.
+#
+# The local arm is not decoration. It is what a run with no key and no network uses, and
+# src.answer._ask falls back to answer.ollama_model automatically on a Groq 429 — so
+# choosing groq here does not mean a rate limit stops the demo, it means the fast path is
+# the default and the slow one is the safety net. Set it to "ollama" deliberately for an
+# offline run; expect the numbers above.
+arm = "groq"
 
 # Model, by HF repo id. openai/gpt-oss-120b is the one model in this pipeline whose HF repo
 # id and Groq wire id are the same string; that is checked in src.answer._groq_wire_name and
