@@ -27,7 +27,11 @@ gate is built on. `select` plus `-fps_mode passthrough` keeps each frame's own P
 showinfo then tells us what it is.
 
 Failure paths (no audio track, zero-length, unreadable codec) raise `IngestError` with the
-ffmpeg stderr attached. VRAG-009 is where they get their tests and fixtures.
+ffmpeg stderr attached, and none of them writes a partial media.json — a half-finished run is
+what makes a failure quiet three phases later. VRAG-009 gave them their fixtures
+(`src.sample.BROKEN_KINDS`, `make sample-broken`) and their tests
+(`tests/unit/test_ingest_failures.py`), which put a real broken file through this pipeline
+rather than a hand-written probe dict.
 """
 
 from __future__ import annotations
@@ -80,12 +84,21 @@ def _binary(name: str) -> str:
     return path
 
 
-def _run(name: str, argv: list[str], timeout: int) -> tuple[subprocess.CompletedProcess, Stage]:
+def _run(
+    name: str, argv: list[str], timeout: int, subject: Path | None = None
+) -> tuple[subprocess.CompletedProcess, Stage]:
     """Run a command, or raise IngestError carrying its stderr.
 
     argv[0] is a bare binary name and is resolved here rather than by the callers, so the
     argv builders stay pure — a test can read the sampling rate off a command line on a
     machine with no ffmpeg — and what lands in media.json stays readable.
+
+    `subject` is the file being worked on, and it is in the message because it was not:
+    a corrupt input reported itself as `probe: ffprobe exited 1 — moov atom not found` with
+    no path in it. ffprobe happens to prefix its own stderr with the filename, so the path
+    was there by luck on one code path and absent everywhere else. VRAG-009 made that a
+    guarantee rather than a coincidence — a batch of ten videos where one is broken has to
+    say which one.
     """
     resolved = [_binary(argv[0]), *argv[1:]]
     started = time.perf_counter()
@@ -101,7 +114,8 @@ def _run(name: str, argv: list[str], timeout: int) -> tuple[subprocess.Completed
         # actual error under per-frame chatter, so drop the chatter before reporting.
         tail = [ln for ln in (proc.stderr or "").strip().splitlines() if "showinfo" not in ln]
         detail = " / ".join(tail[-3:]) if tail else "no stderr"
-        raise IngestError(f"{name}: {argv[0]} exited {proc.returncode} — {detail}")
+        where = f" on {subject}" if subject is not None else ""
+        raise IngestError(f"{name}: {argv[0]} exited {proc.returncode}{where} — {detail}")
     return proc, Stage(name, argv, elapsed)
 
 
@@ -130,7 +144,7 @@ def probe_args(video: Path) -> list[str]:
 
 
 def probe(video: Path) -> tuple[dict[str, Any], Stage]:
-    proc, stage = _run("probe", probe_args(video), PROBE_TIMEOUT_S)
+    proc, stage = _run("probe", probe_args(video), PROBE_TIMEOUT_S, subject=video)
     try:
         return json.loads(proc.stdout), stage
     except json.JSONDecodeError as exc:
@@ -241,7 +255,7 @@ def extract_audio(
         )
     acfg = audio_config(cfg)
     out_wav.parent.mkdir(parents=True, exist_ok=True)
-    _, stage = _run("audio", audio_args(video, out_wav, acfg), FFMPEG_TIMEOUT_S)
+    _, stage = _run("audio", audio_args(video, out_wav, acfg), FFMPEG_TIMEOUT_S, subject=video)
     written = out_wav.stat().st_size
     return {
         "path": out_wav.as_posix(),
@@ -336,7 +350,9 @@ def sample_frames(
         stale.unlink()
 
     pattern = out_dir / f"frame_%05d.{frames_cfg['format']}"
-    proc, stage = _run("frames", frame_args(video, pattern, frames_cfg), FFMPEG_TIMEOUT_S)
+    proc, stage = _run(
+        "frames", frame_args(video, pattern, frames_cfg), FFMPEG_TIMEOUT_S, subject=video
+    )
 
     files = sorted(out_dir.glob(f"frame_*.{frames_cfg['format']}"))
     times = frame_timestamps(proc.stderr or "")
@@ -373,6 +389,15 @@ def ingest(video: Path, cfg: Config, out_root: Path = OUT_ROOT) -> dict[str, Any
     video = Path(video)
     if not video.is_file():
         raise IngestError(f"{video}: not a file. `make sample` writes samples/one.mp4.")
+    # Checked here rather than left to ffprobe. An empty file is the most common broken input
+    # there is — an interrupted download, a full disk, a job that wrote nothing — and ffprobe
+    # reports it as "moov atom not found / Invalid data found when processing input", which
+    # sends the reader looking for a corrupt container instead of an empty file.
+    if video.stat().st_size == 0:
+        raise IngestError(
+            f"{video}: 0 bytes. The file is empty — nothing was written to it, so there is "
+            f"no container to read. Check whatever produced it."
+        )
 
     meter = Meter()
     started = time.perf_counter()

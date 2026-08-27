@@ -664,3 +664,68 @@ Blocked:  nothing. One thing flagged, not blocking:
 Next:     VRAG-018 (concept primer + coach page) or VRAG-009 (failure tests: no audio track,
           zero-length, unreadable codec) - VRAG-009 has been the deferred one for four sessions
           now and is the only Phase 0 card still open.
+
+## 2026-08-27 — Ritika (Evaluator) — VRAG-009
+Did:      The three failure paths ingest has raised on since VRAG-005, given real files and
+          real tests. Its docstring had said "VRAG-009 is where they get their tests and
+          fixtures" for five sessions; the raises existed, the files did not.
+            src/sample.py                        BROKEN_KINDS + broken()/broken_args(), --broken
+            tests/unit/test_ingest_failures.py   38 tests, 5 fixtures
+            Makefile                             make sample-broken; make test -> tests/unit
+          Five fixtures, offline and deterministic: no_audio (video stream, no audio),
+          zero_duration (-t 0), empty (0 bytes), truncated (ftyp box, no moov), garbage (64 kB
+          of seeded noise named .mp4). Three of the five are written byte by byte and need no
+          ffmpeg, so the failure paths stay tested on a machine where `make demo` cannot run.
+          Four assertions per fixture, because "fails loudly with a useful message" is all
+          four and any one alone passes while the others rot: IngestError and not a
+          CalledProcessError three frames deep; the phrase that tells this failure from the
+          other four; the message NAMES THE FILE; and no partial output survives - no
+          media.json, no wav, no frames.
+          Three things came out of building the files that reading the code had not:
+          (1) A corrupt input named no file. `probe: ffprobe exited 1 - moov atom not found`,
+          no path. The path was in the output only because ffprobe prefixes its own stderr
+          with the filename - luck on one code path, absent on the others. _run() now takes
+          the file and puts it in the message. Ten videos where one is broken has to say which.
+          (2) A 0-byte file reported itself as a corrupt container: ffprobe answers "moov atom
+          not found / Invalid data found" for an empty file, which sends the reader after a
+          broken encode instead of a job that wrote nothing. ingest() checks the size itself
+          now, before ffprobe - which is also why `empty` is the one failure path that tests
+          with no ffmpeg at all.
+          (3) ffprobe SUCCEEDS on zero_duration.mp4 - exit 0, probe_score 100, a parseable mov
+          container with nb_streams 0 and no duration key. My own stage table said "probe" and
+          the test failed on it; the rejection is media_metadata's. That fixture proves what
+          the other four cannot: a file can pass ffprobe clean and still have nothing in it.
+          A hand-written probe dict could not have caught any of the three.
+          Also: `pytest tests/unit` did not exist. The card's acceptance criterion names it and
+          the supervisor re-runs the gate command, so 19 flat tests/test_*.py moved to
+          tests/unit/ (git mv, paths only, no assertion touched) and `make test` is now
+          `pytest tests/unit`. One real breakage from the move, caught and fixed:
+          test_chunk.py read config.toml via __file__.parent.parent, which after the move is
+          tests/. tests/conftest.py stays where it is - conftest applies to subdirectories.
+          `uv run pytest tests/unit -q -rs`  ->  557 passed, 1 skipped
+            baseline before this card was 519 passed, 1 skipped: 38 new tests, and the 1 skip
+            is the pre-existing Windows-symlink test in test_api.py, not an ffmpeg skip.
+          `uv run pytest tests/gates/gate_phase0.py -q`  ->  9 passed
+          `uv run pytest tests/gates/gate_phase1.py tests/gates/test_no_leakage.py -q` -> 32 passed
+          $0.00 - no model call in this card. ffmpeg and pytest only, fully offline.
+Blocked:  nothing. Three flagged:
+          (1) `make gate` is 3 failed, 52 passed - gate_phase2.py and two in gate_phase2a.py.
+          Not from this card: nothing in src/answer.py, retrieve, prompts/, schemas/ or
+          config.toml is touched, and the gate output names
+          model='bartowski/Llama-3.2-3B-Instruct-GGUF:Q4_K_M' - there is no GROQ_API_KEY in
+          this environment, so it took the documented ollama fallback. config.toml's own
+          [answer] comment records that arm as 1/3 abstentions and `make gate` 5 failed /
+          50 passed; observed 1/3 and 3 failed / 52 passed. gate_phase0, gate_phase1 and
+          leakage are green. Worth a supervisor re-run with the key set, because on this
+          machine the Phase 2 gates cannot be scored on the arm they pin.
+          (2) The ffmpeg trap again, and it is now load-bearing for this card: ffmpeg 9.0 is
+          installed but off PATH in these shells, and without it 24 of the 38 new tests skip
+          and the suite still reads green. The gate command's evidence is the passed AND
+          skipped counts. Export the Gyan.FFmpeg bin dir first. A skip is not a pass.
+          (3) tools/vecbrowse.py is untracked in the working tree and is not mine - it
+          references a `make browse` target that does not exist in the Makefile. Left alone
+          and deliberately not committed with this card.
+          Also, same mismatch as every previous session: the board MCP authenticates as vimal,
+          so start/note/request_review on 1783 post under his name and not mine.
+Next:     VRAG-018 (concept primer + coach page) is the last Backlog card of mine that is not
+          the retro. Phase 0 has no open cards left after this one.

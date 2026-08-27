@@ -104,7 +104,7 @@ def test_real_config_toml_levers_are_within_the_citation_tolerance():
     """
     from src.config import load as load_config
 
-    levers = chunk_config(load_config(Path(__file__).parent.parent / "config.toml"))
+    levers = chunk_config(load_config(Path(__file__).parent.parent.parent / "config.toml"))
     # Strictly under, not at: a chunk overhangs its window by the length of the segments at
     # each end, so a window sitting exactly on the tolerance has no room to overhang into.
     assert levers["window_s"] < CITATION_TOLERANCE_S
