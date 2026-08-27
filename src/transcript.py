@@ -280,7 +280,12 @@ def _groq_arm(
         segments: list[Segment] = []
         for offset_s, piece in pieces:
             raw = _groq_one(client, piece, groq_model, language, model, meter)
-            segments.extend(offset_segments(raw, offset_s))
+            # Bound each piece against its own length, before it is shifted onto the video
+            # clock. Per piece and not once at the end, because every piece has a padded
+            # final window and only the last one's overrun would show up as running past
+            # the video - a middle piece's would land silently on top of the next piece.
+            bounded = bound_to_audio(raw, _wav_duration_s(piece), piece.name)
+            segments.extend(offset_segments(bounded, offset_s))
 
     # Pieces are transcribed in order and each is shifted onto the video clock, but the sort
     # is what the contract promises and it costs nothing to keep it true here.
@@ -311,6 +316,60 @@ def drop_impossible(segments: list[Segment], wav: Path | None = None) -> list[Se
             f"does not run forward - unciteable, see transcript.drop_impossible"
         )
     return good
+
+
+def bound_to_audio(
+    segments: list[Segment], duration_s: float, where: str = ""
+) -> list[Segment]:
+    """Hold segments inside the audio they were transcribed from.
+
+    Whisper pads its last analysis window to a full 30 s and will caption the padding, so
+    the final segment of a recording routinely ends after the recording does. On the 90.9
+    min client meeting it was:
+
+        5448.136 -> 5478.116  'Thank you.'     29.98 s, 23.5 s of it past the audio
+
+    29.98 s is the tell - one whisper window, near enough exactly - and the audio is
+    5454.656 s long. The chunker then refused the whole video, correctly: a chunk inherits
+    its range from the segments inside it, so that one segment made a chunk that claimed to
+    end 23 s after the video did, and a citation into it would seek a player past the end.
+
+    Clamping is not the same as repairing a duration, which `drop_impossible` refuses to do.
+    The end of the audio is a measured fact - it is in media.json, off the wav header - and
+    a segment cannot describe sound that was never recorded. So t_end is held to it and the
+    text is kept, because whether those words were spoken at 5448 s is not something this
+    function knows. A segment that starts at or after the end is a different case: there is
+    no audio under any of it, so it is dropped rather than flattened onto the last instant.
+    """
+    if duration_s <= 0:
+        return segments
+
+    kept: list[Segment] = []
+    clamped = 0
+    dropped = 0
+    worst = 0.0
+    for s in segments:
+        if s.t_start >= duration_s:
+            dropped += 1
+            worst = max(worst, s.t_end - duration_s)
+            continue
+        if s.t_end > duration_s:
+            clamped += 1
+            worst = max(worst, s.t_end - duration_s)
+            kept.append(Segment(t_start=s.t_start, t_end=duration_s, text=s.text))
+            continue
+        kept.append(s)
+
+    # 0.02 s is whisper's timestamp quantum, so a segment landing a tick past the end is
+    # rounding and not a hallucination. Clamp it silently; say something about the rest.
+    if worst > 0.02 and (clamped or dropped):
+        place = f" in {where}" if where else ""
+        print(
+            f"  bounded {clamped + dropped} segment(s){place} to the {duration_s:.3f}s of "
+            f"audio ({clamped} clamped, {dropped} dropped, worst {worst:.2f}s past the end) "
+            f"- see transcript.bound_to_audio"
+        )
+    return kept
 
 
 def _groq_client(api_key: str):

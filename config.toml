@@ -119,8 +119,32 @@ top_k = 5
 #
 # Switch between them without touching any Python:
 #   arm = "groq"    →  hosted, fast, free tier (rate-limited)
-#   arm = "ollama"  →  local, no rate limit, requires `ollama pull hf.co/openai/whisper-large-v3-turbo`
-arm = "ollama"
+#   arm = "ollama"  →  local — but NOT for this model. See below.
+#
+# This one does not currently have a local arm, and that is not a missing pull. Two
+# independent walls, both measured rather than assumed:
+#
+#   $ ollama pull hf.co/openai/whisper-large-v3-turbo
+#   Error: pull model manifest: 400: {"error":"Repository is not GGUF or is not compatible
+#   with llama.cpp"}
+#
+#   >>> import ollama; hasattr(ollama, "transcribe")
+#   False                                     # ollama 0.32.14 — src/transcript._ollama_arm
+#                                             # calls ollama.transcribe(), which is not there
+#
+# Ollama loads GGUF through llama.cpp; whisper is an encoder-decoder ASR model and is not
+# that, so `hf.co/<repo>` can never resolve for it — the same class of bug as the nomic id
+# in [embed], except that one had a -GGUF conversion to point at and this one does not.
+#
+# Flipping this to "ollama" does not fail at the pull, which is what makes it worth a
+# comment this long: it fails at the *cache check*. transcript_for() reuses a cached
+# transcript only when its recorded arm matches this value, so changing the arm invalidates
+# every transcript already on disk and sends a 90 minute video back through an arm that
+# cannot run — "no attribute 'transcribe'" on a file that was already transcribed.
+#
+# So the arm stays hosted, and a run with no GROQ_API_KEY cannot ingest new video. It can
+# still answer over an index that already exists: [answer] and [embed] both run locally.
+arm = "groq"
 
 # Model, named by its HF repo id. The arm translates this to whatever its API expects.
 model = "openai/whisper-large-v3-turbo"
