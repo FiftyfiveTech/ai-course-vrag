@@ -1,4 +1,4 @@
-.PHONY: setup doctor corpus corpus-check corpus-pointers heldout-check leakage-check sample sample-real sample-broken test gate gate-phase1 gate-phase2a demo chunks index index-dev probe answer answer-dev ask api openapi latency clean
+.PHONY: sources setup doctor corpus corpus-check corpus-pointers heldout-check leakage-check sample sample-real sample-broken test gate gate-phase1 gate-phase2a demo chunks index index-dev probe answer answer-dev ask api openapi latency clean
 .DEFAULT_GOAL := help
 
 # The video the demo ingests, and the file the levers are read from. Both overridable:
@@ -9,6 +9,10 @@ QUESTIONS ?= evals/probe_questions.txt
 
 # The question `make answer` and `make ask` put to the corpus. Overridable:
 #   make ask Q="how old was Bernini when he met the Pope?"
+#
+# Prefix it with @<video_id> to answer from one video and nothing else - `make sources` lists
+# what can be tagged, and an unknown tag is refused rather than silently ignored:
+#   make ask Q="@611 how old was Bernini when he met the Pope?"
 Q ?= What two tools does the presenter say you need to make your first paper cut?
 
 # Extra flags for `make ask`. --open also opens the page in a browser; left out of the
@@ -57,6 +61,7 @@ help:
 	@echo "make api     the same answer over HTTP, for a frontend to call; /docs for the schema"
 	@echo "make openapi print the OpenAPI document and exit; no server, no network"
 	@echo "make latency which phase ate the wall clock last session; LATENCY_FLAGS=--list for older"
+	@echo "make sources which videos an @tag can name; scope a question with make ask Q=\"@611 ...\""
 
 setup:
 	@command -v uv >/dev/null || { echo "uv not installed: curl -LsSf https://astral.sh/uv/install.sh | sh"; exit 1; }
@@ -158,6 +163,16 @@ index-dev:
 # (one per line) or a .jsonl with a 'question' field; - reads stdin.
 probe:
 	uv run python -m src.probe $(QUESTIONS) --config $(CONFIG)
+
+# What `@` accepts in a question. A question that tags a source is answered from that
+# source alone - the tag becomes a metadata filter on the Chroma query, so nothing from
+# any other video can be retrieved, cited or grounded onto (src/mention.py). This lists
+# the handles, and lists what is NOT taggable too, because "why does @091 not work" is
+# the question it exists to answer.
+#
+# No model call and no network; it reads the manifest and the local store.
+sources:
+	uv run python -m src.mention --config $(CONFIG)
 
 # One question, answered with citations - VRAG-019. Retrieval, then generation constrained by
 # schemas/answer.py, then grounding. Needs the index (`make index-dev`) and, on the groq arm,

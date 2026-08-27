@@ -4,6 +4,7 @@ Question in, answer out, and every citation is a link that opens the video at th
 came from:
 
     make ask Q="what two tools do I need to cut paper?"
+    make ask Q="@611 what two tools do I need?"   # that video only - src/mention.py
     make ask Q="..." ASK_FLAGS=--open        # and open it in a browser
 
     uv run python -m src.ask "how old was Bernini when he met the Pope" --config config.toml
@@ -294,6 +295,13 @@ video { width: 100%; max-height: 27rem; background: #000; border-radius: 8px; di
   color: var(--muted); font-size: .9rem;
 }
 .fallback a { color: var(--accent); }
+.scope {
+  margin: -.9rem 0 1.5rem; display: flex; gap: .45rem; align-items: baseline;
+  color: var(--muted); font-size: .85rem;
+}
+.scope span {
+  color: var(--accent); font-weight: 700; font-family: ui-monospace, Consolas, monospace;
+}
 footer {
   margin-top: 2.5rem; padding-top: 1rem; border-top: 1px solid var(--line);
   color: var(--muted); font-size: .78rem;
@@ -399,6 +407,15 @@ def render_page(
     parts.append("<main>")
     parts.append('<p class="kicker">VRAG · answer with citations</p>')
     parts.append(f"<h1>{esc(question)}</h1>")
+    if run.scoped:
+        # On the page and not only in the footer. A scoped answer cites one video, which
+        # is indistinguishable by eye from an unscoped answer that happened to cite one
+        # video — and the difference is whether the others were ever eligible.
+        scoped_to = ", ".join(f"video {esc(v)}" for v in run.scope)
+        parts.append(
+            f'<p class="scope"><span>@</span>answered from {scoped_to} only — the rest of '
+            f"the index was not searched</p>"
+        )
 
     if run.answer is None:
         parts.append(
@@ -509,7 +526,8 @@ def _footer_html(
         f"answer: {cfg.get('answer.arm')} · {effective_model(cfg)} · "
         f"temperature {cfg.get('answer.temperature')}",
         f"retrieval: {cfg.get('embed.model')} · top_k {cfg.get('retrieve.top_k')} · "
-        f"{len(run.hits)} passage(s) retrieved",
+        f"{len(run.hits)} passage(s) retrieved · "
+        f"scope {', '.join(run.scope) if run.scoped else 'whole index'}",
         f"prompt: {prompt_path.as_posix()} sha256:{prompt_sha[:16]} · "
         f"config: {fingerprint['path']} sha256:{fingerprint['sha256'][:16]}",
     ]
@@ -612,6 +630,18 @@ def ask(
         raise AskError("no question — `make ask Q=\"…\"`")
 
     run = answer_question(question, cfg, meter)
+    if not run.hits and run.scoped:
+        # Distinct from the message below on purpose. `src.mention` already refuses a tag
+        # whose video has no chunk in the index, so reaching here means the store had the
+        # video when the tag was resolved and not when it was queried — a re-index between
+        # the two. "run make index-dev" is right; "the index is empty" is not, and would
+        # send someone looking at the wrong thing.
+        raise AskError(
+            f"nothing in the index matched {', '.join('video ' + v for v in run.scope)}, "
+            f"which the question scoped it to. The collection "
+            f"{cfg.get('embed.collection')!r} does hold other videos — ask without the "
+            f"tag, or re-index that one."
+        )
     if not run.hits:
         raise AskError(
             "retrieval returned no passages, so there is nothing to cite and nothing to "
@@ -648,6 +678,12 @@ def report(
     """The terminal half of the demo: the answer, and a url per citation."""
     out = out or sys.stdout
     print(f"\nQ: {question}\n", file=out)
+    if run.scoped:
+        print(
+            f"   scope: {', '.join('video ' + v for v in run.scope)} only "
+            f"(the rest of the index was not searched)\n",
+            file=out,
+        )
 
     if run.answer is None:
         print(f"   SCHEMA-INVALID  {run.error}", file=out)

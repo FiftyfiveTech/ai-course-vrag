@@ -12,6 +12,11 @@ Usage:
     meter = Meter()
 
     hits = retrieve("What does the performer place on the table?", cfg, meter)
+
+    # Only video 611, whatever else the index holds. This is what an `@611` tag in a
+    # question becomes — see src/mention.py.
+    hits = retrieve("What is on the table?", cfg, meter, video_ids=["611"])
+
     for h in hits:
         print(f"{h.video_id}  {h.t_start:.1f}s–{h.t_end:.1f}s  score={h.score:.3f}")
         print(f"  {h.text[:80]}")
@@ -63,11 +68,23 @@ class RetrievedChunk:
 # ---------------------------------------------------------------------------
 
 
-def retrieve(question: str, cfg: Config, meter: Meter) -> list[RetrievedChunk]:
+def retrieve(
+    question: str,
+    cfg: Config,
+    meter: Meter,
+    video_ids: Sequence[str] | None = None,
+) -> list[RetrievedChunk]:
     """Embed question and return top-k chunks from the Chroma collection.
 
     k is read from config: retrieve.top_k.
     Returns an empty list when the collection is empty.
+
+    `video_ids` restricts the search to those videos and nothing else — it is what an
+    `@source` tag in the question becomes (`src.mention`). It is a filter applied by the
+    store *before* ranking, not a re-rank of the top k afterwards: taking k results and
+    dropping the ones from other videos would return fewer than k, and often zero, because
+    the excluded videos are exactly the ones that outranked the wanted one. None or empty
+    means the whole index, which is the default and the untagged case.
     """
     k = int(cfg.get("retrieve.top_k"))
     model = cfg.get("embed.model")
@@ -80,7 +97,18 @@ def retrieve(question: str, cfg: Config, meter: Meter) -> list[RetrievedChunk]:
     # visible anywhere — the meter recorded model calls only, so a 3.59s request reported
     # itself as 1.44s. See `make latency`.
     with meter.stage("retrieve.query"):
-        return _query(vector, k, chroma_path, collection_name)
+        return _query(vector, k, chroma_path, collection_name, where=where(video_ids))
+
+
+def where(video_ids: Sequence[str] | None) -> dict | None:
+    """Chroma's metadata filter for a set of videos, or None for no filter at all.
+
+    `$in` even for a single id, so the one-tag and many-tag cases go down one path — a
+    `{"video_id": "611"}` shortcut for the common case is a second filter shape to keep
+    true, and Chroma treats a one-element `$in` identically.
+    """
+    ids = [str(v) for v in (video_ids or []) if str(v)]
+    return {"video_id": {"$in": ids}} if ids else None
 
 
 def recall_at_k(
@@ -156,6 +184,7 @@ def _query(
     k: int,
     chroma_path: Path,
     collection_name: str,
+    where: dict | None = None,
 ) -> list[RetrievedChunk]:
     try:
         import chromadb
@@ -176,14 +205,49 @@ def _query(
     if count == 0:
         return []
 
+    # min() against the whole collection and not against the filtered subset: Chroma has no
+    # count-with-a-where, and asking for more rows than the filter can supply returns fewer
+    # rather than raising. The cap exists only because n_results above the collection size
+    # is the error case; a filter narrowing it further is fine.
     actual_k = min(k, count)
     results = collection.query(
         query_embeddings=[vector],
         n_results=actual_k,
         include=["documents", "metadatas", "distances"],
+        **({"where": where} if where else {}),
     )
 
     return _parse_query_results(results)
+
+
+def indexed_video_ids(cfg: Config) -> list[str]:
+    """The distinct video_ids the collection holds. Empty when there is no index yet.
+
+    Read-only on purpose — `src.embed._get_collection` mkdirs and get_or_creates, so calling
+    the writer's door from here would make listing what can be tagged *create* the empty
+    index it is listing. Same rule `src.api.index_status` follows.
+    """
+    try:
+        import chromadb
+    except ImportError:
+        return []
+
+    chroma_path = Path(cfg.get("embed.chroma_path"))
+    if not chroma_path.exists():
+        return []
+    try:
+        client = chromadb.PersistentClient(path=str(chroma_path))
+        collection = client.get_collection(str(cfg.get("embed.collection")))
+        rows = collection.get(include=["metadatas"])
+    except Exception:
+        return []
+
+    ids = {
+        str(m.get("video_id"))
+        for m in (rows.get("metadatas") or [])
+        if m and m.get("video_id") is not None
+    }
+    return sorted(ids)
 
 
 def _parse_query_results(results: dict) -> list[RetrievedChunk]:

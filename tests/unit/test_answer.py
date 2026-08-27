@@ -9,6 +9,7 @@ gate's job (`tests/gates/gate_phase2a.py`).
 
 from __future__ import annotations
 
+import io
 import json
 from pathlib import Path
 
@@ -385,9 +386,16 @@ def wired(monkeypatch, tmp_path):
         f'prompt = "{prompt.as_posix()}"\ntemperature = 0.0\nmax_tokens = 100\n',
         tmp_path,
     )
-    state = {"hits": [chunk()], "reply": "{}"}
+    state = {"hits": [chunk()], "reply": "{}", "asked": None, "video_ids": ()}
 
-    monkeypatch.setattr(mod, "retrieve", lambda q, c, m: state["hits"])
+    # Records the scope it was handed, so a test can assert that an `@` tag reached the
+    # store as a filter rather than being left in the question text.
+    def fake_retrieve(question, cfg_, meter, video_ids=None):
+        state["asked"] = question
+        state["video_ids"] = tuple(video_ids or ())
+        return state["hits"]
+
+    monkeypatch.setattr(mod, "retrieve", fake_retrieve)
     monkeypatch.setattr(
         mod, "_ask", lambda s, u, c, m: (state["reply"], 7, "openai/gpt-oss-120b")
     )
@@ -471,3 +479,116 @@ def test_the_answer_model_has_a_rate_in_the_shared_logger():
     from src.telemetry import RATES
 
     assert load_config().get("answer.model") in RATES
+
+
+# ---------------------------------------------------------------------------
+# `@source` — the tag is parsed here, once, for every entry point
+# ---------------------------------------------------------------------------
+
+
+def _sources():
+    from src.mention import Source
+
+    return [
+        Source(video_id="611", label="Knowledge / Literature & Art", indexed=True, split="dev"),
+        Source(video_id="181", label="Artistic Performance / Stage Play", indexed=True, split="dev"),
+    ]
+
+
+@pytest.fixture
+def tagged(wired, monkeypatch):
+    """`wired`, with the source catalogue stubbed so no manifest or index is read."""
+    monkeypatch.setattr(mod, "parse_scope", _scoped)
+    return wired
+
+
+def _scoped(question, cfg):
+    from src.mention import resolve
+
+    return resolve(question, _sources())
+
+
+def test_a_tagged_question_reaches_retrieval_as_a_filter(tagged):
+    cfg, state = tagged
+    state["reply"] = json.dumps({"answer": "Eight.", "citations": [], "abstain": True})
+    mod.answer("@611 how old?", cfg, Meter())
+    assert state["video_ids"] == ("611",)
+
+
+def test_the_tag_does_not_reach_the_embedder(tagged):
+    # `@611` is not a word the corpus ever says, so leaving it in the text moves the query
+    # vector for nothing.
+    cfg, state = tagged
+    state["reply"] = json.dumps({"answer": "x", "citations": [], "abstain": True})
+    mod.answer("@611 how old?", cfg, Meter())
+    assert state["asked"] == "how old?"
+
+
+def test_an_untagged_question_is_unfiltered(tagged):
+    cfg, state = tagged
+    state["reply"] = json.dumps({"answer": "x", "citations": [], "abstain": True})
+    mod.answer("how old?", cfg, Meter())
+    assert state["video_ids"] == ()
+    assert state["asked"] == "how old?"
+
+
+def test_the_run_records_the_scope_that_was_applied(tagged):
+    cfg, state = tagged
+    state["reply"] = json.dumps({"answer": "x", "citations": [], "abstain": True})
+    run = mod.answer("@611 how old?", cfg, Meter())
+    assert run.scope == ("611",)
+    assert run.scoped is True
+    # The question keeps the tag the person typed; `query` is what the model actually saw.
+    assert run.question == "@611 how old?"
+    assert run.query == "how old?"
+
+
+def test_two_tags_scope_to_both(tagged):
+    cfg, state = tagged
+    state["reply"] = json.dumps({"answer": "x", "citations": [], "abstain": True})
+    run = mod.answer("@611 @181 how old?", cfg, Meter())
+    assert run.scope == ("611", "181")
+
+
+def test_a_schema_invalid_reply_still_records_the_scope(tagged):
+    # The scope is a property of the request, not of the reply — a run that carried it on
+    # the happy path only would lose it in exactly the cases worth reading.
+    cfg, state = tagged
+    state["reply"] = "not json at all"
+    run = mod.answer("@611 how old?", cfg, Meter())
+    assert run.valid is False
+    assert run.scope == ("611",)
+
+
+def test_an_unresolvable_tag_raises_rather_than_answering_unscoped(tagged):
+    from src.mention import MentionError
+
+    cfg, state = tagged
+    with pytest.raises(MentionError):
+        mod.answer("@bernini how old?", cfg, Meter())
+    # And nothing was asked of the model: the refusal happens before any spend.
+    assert state["asked"] is None
+
+
+def test_the_report_says_what_the_answer_was_scoped_to(tagged):
+    cfg, state = tagged
+    state["reply"] = json.dumps(
+        {
+            "answer": "Eight.",
+            "citations": [{"video_id": "611", "t_start": 20.0, "t_end": 45.0}],
+            "abstain": False,
+        }
+    )
+    run = mod.answer("@611 how old?", cfg, Meter())
+    out = io.StringIO()
+    mod.report(run, out)
+    assert "scope: video 611 only" in out.getvalue()
+
+
+def test_the_report_says_nothing_about_scope_when_there_was_none(tagged):
+    cfg, state = tagged
+    state["reply"] = json.dumps({"answer": "x", "citations": [], "abstain": True})
+    run = mod.answer("how old?", cfg, Meter())
+    out = io.StringIO()
+    mod.report(run, out)
+    assert "scope:" not in out.getvalue()

@@ -477,6 +477,19 @@ main {
   color: var(--ink-3);
 }
 
+/* A scoped answer is a different claim from an unscoped one, so it does not get the same
+   quiet dashed box every other aside gets — it is tinted and solid. */
+.note.scoped {
+  border-style: solid;
+  border-color: color-mix(in srgb, var(--brand) 30%, var(--line));
+  background: var(--brand-soft);
+  color: color-mix(in srgb, var(--brand) 55%, var(--ink));
+}
+
+/* A refusal can be several lines — an unresolvable @ tag comes back with the list of
+   handles that do resolve, and collapsing that into one paragraph loses the list. */
+.bubble-a.error { white-space: pre-wrap; }
+
 /* ------------------------------------------------------------ provenance */
 
 .meta {
@@ -498,6 +511,10 @@ main {
 .meta .chip b { font-weight: 600; color: var(--ink-2); }
 .meta .chip.mono { font-family: var(--mono); font-size: 11px; }
 .meta .chip.repair { border-color: color-mix(in srgb, var(--warn) 40%, var(--line)); }
+.meta .chip.scope {
+  border-color: color-mix(in srgb, var(--brand) 40%, var(--line));
+  color: color-mix(in srgb, var(--brand) 70%, var(--ink));
+}
 
 /* -------------------------------------------------------------- composer */
 
@@ -510,6 +527,11 @@ main {
   padding: 20px;
   background: linear-gradient(to top, var(--bg) 62%, transparent);
 }
+
+/* The @ menu opens upward out of this box, so it is the positioning context and the field
+   pill is not: an absolutely positioned child of .field would be measured against a
+   border-radius:999px box whose padding is asymmetric. */
+.ask { position: relative; }
 
 .field {
   display: flex;
@@ -527,6 +549,17 @@ main {
   box-shadow: var(--shadow), 0 0 0 4px var(--brand-soft);
 }
 
+/* The input and the layer that paints its @tags are two boxes drawn on top of each other,
+   so every metric below is duplicated deliberately: same font, same padding, same
+   line-height, same white-space. A difference in any of them shows up as the caret sitting
+   between the wrong two letters. */
+.input-wrap {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  display: flex;
+}
+
 .field input {
   flex: 1;
   min-width: 0;
@@ -535,9 +568,70 @@ main {
   background: none;
   color: inherit;
   font: inherit;
+  line-height: 22px;
   padding: 9px 0;
 }
 .field input::placeholder { color: var(--ink-3); }
+
+.highlight {
+  position: absolute;
+  inset: 0;
+  font: inherit;
+  line-height: 22px;
+  padding: 9px 0;
+  /* `pre` and not `pre-wrap`: the input is one line and scrolls horizontally, and a mirror
+     that wrapped would part company with it on the first long question. */
+  white-space: pre;
+  overflow: hidden;
+  color: var(--ink);
+  pointer-events: none;
+}
+
+/* Once the mirror is drawing the text, the input's own glyphs are hidden and only its caret
+   is left. The class is added by app.js and never in the markup: with no mirror on the page
+   — a tab open across a deploy — the input has to keep painting its own text. */
+.field input.mirrored {
+  position: relative;
+  z-index: 1;
+  color: transparent;
+  caret-color: var(--ink);
+}
+/* Dragging over the text would otherwise reveal the transparent glyphs on top of the mirror
+   and show every character twice. */
+.field input.mirrored::selection {
+  color: transparent;
+  background: color-mix(in srgb, var(--brand) 22%, transparent);
+}
+
+/* The pill. Padding and borders are faked with box-shadow spread and never set for real:
+   both would widen the glyph run and slide everything after the tag out from under the
+   caret. box-shadow does not participate in layout, so the tag can look inset while
+   occupying exactly the width its characters occupy in the input underneath. */
+.highlight .tag {
+  border-radius: 5px;
+  background: var(--brand-soft);
+  color: var(--brand);
+  box-shadow: 0 0 0 2px var(--brand-soft);
+}
+
+/* A tag that names nothing indexed. Said before Enter rather than after: the server answers
+   it 422, and finding that out by asking is a worse way to learn it. Wavy underline and
+   colour only — again, nothing that changes width. */
+.highlight .tag.unknown {
+  background: color-mix(in srgb, var(--warn) 16%, transparent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--warn) 16%, transparent);
+  color: var(--warn);
+  text-decoration: underline wavy;
+  text-underline-offset: 3px;
+}
+
+/* Before GET /videos answers there is nothing to check a tag against, so it is drawn as a
+   tag but not yet judged — flashing every tag red for the first 100ms would be a lie. */
+.highlight .tag.pending {
+  background: var(--line-2);
+  box-shadow: 0 0 0 2px var(--line-2);
+  color: var(--ink-2);
+}
 
 #send {
   flex: none;
@@ -554,6 +648,79 @@ main {
 }
 #send:hover:not(:disabled) { transform: scale(1.06); }
 #send:disabled { opacity: .4; cursor: not-allowed; }
+
+/* ---------------------------------------------------------- @ source picker */
+
+.mentions {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  /* Above the field, not below it: the composer is fixed to the bottom of the viewport, so
+     a menu opening downward would open off-screen. */
+  bottom: calc(100% + 8px);
+  z-index: 20;
+  max-height: 260px;
+  overflow-y: auto;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+  box-shadow: var(--shadow);
+}
+
+.mention {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 10px;
+  background: none;
+  color: var(--ink);
+  font: inherit;
+  font-size: 13.5px;
+  text-align: left;
+  cursor: pointer;
+}
+.mention.active, .mention:hover { background: var(--brand-soft); }
+.mention .at { color: var(--brand); font-family: var(--mono); font-weight: 700; }
+.mention .mhandle {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+}
+.mention .mlabel {
+  color: var(--ink-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mention .msplit {
+  margin-left: auto;
+  flex: none;
+  padding: 1px 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 11px;
+  color: var(--ink-3);
+}
+.mention.active .msplit { border-color: color-mix(in srgb, var(--brand) 35%, var(--line)); }
+
+.mention-empty { padding: 8px 10px; font-size: 13px; color: var(--ink-3); }
+
+.hint { margin: 8px 2px 0; font-size: 12px; color: var(--ink-3); }
+.hint kbd {
+  padding: 1px 5px;
+  border: 1px solid var(--line);
+  border-bottom-width: 2px;
+  border-radius: 5px;
+  background: var(--panel);
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--ink-2);
+}
 
 .examples { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
 .examples button {
@@ -585,7 +752,7 @@ main {
 @media (max-width: 620px) {
   .hero { padding: 44px 0 28px; }
   .product { display: none; }
-  main { padding-bottom: 190px; }
+  main { padding-bottom: 214px; }
 }
 
 @media (prefers-reduced-motion: reduce) {

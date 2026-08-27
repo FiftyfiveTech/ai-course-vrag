@@ -5,6 +5,7 @@ abstention. This is the module the Phase 2 gate (VRAG-021) scores; retrieval onl
 the right moment in the top 5, and this has to notice that it is there.
 
     make answer Q="how old was Bernini when he met the Pope"
+    make answer Q="@611 how old was Bernini?"   # that video only - src/mention.py
     make answer-dev                 # every dev pair, one line each
     make gate-phase2a               # the VRAG-019 gate
 
@@ -12,11 +13,13 @@ the right moment in the top 5, and this has to notice that it is there.
     run = answer("what two tools do I need to cut paper?", cfg, meter)
     print(run.answer.answer, [str(c) for c in run.answer.citations])
 
-Four steps, and each one is somewhere a wrong answer can come from:
+Five steps, and each one is somewhere a wrong answer can come from:
 
-    retrieve  ->  render_context  ->  the model  ->  validate  ->  ground
+    scope  ->  retrieve  ->  render_context  ->  the model  ->  validate  ->  ground
 
-`retrieve` is VRAG-016 and unchanged. `render_context` prints each passage with the exact
+`scope` reads the `@source` tags out of the question and turns them into a store-level
+filter (`src.mention`); with no tag it is the identity and retrieval sees the whole
+index. `retrieve` is VRAG-016 and takes that filter. `render_context` prints each passage with the exact
 `video_id`/`t_start`/`t_end` the model is told to copy. The model is constrained at generation
 time by `schemas.answer.json_schema()`, then its output is validated against the same
 declaration — that is the "schema-valid" number the gate reports, and it is measured on what
@@ -53,6 +56,7 @@ from pydantic import ValidationError
 from schemas.answer import Answer, json_schema
 from src.config import Config
 from src.config import load as load_config
+from src.mention import scope as parse_scope
 from src.retrieve import RetrievedChunk, retrieve
 from src.telemetry import Meter
 
@@ -89,6 +93,23 @@ class AnswerRun:
     # local one mid-call. Empty only for an AnswerRun built by a test fake.
     model: str = ""
 
+    # Which videos retrieval was allowed to see, out of the `@source` tags in the question
+    # (src.mention). Empty is the whole index and is the default. Recorded rather than
+    # re-derived downstream: `question` still carries the tags a person typed, and a reader
+    # of a run has to be able to see the scope that was actually *applied* — a tag that
+    # resolved to nothing is a refusal, but a tag someone edited out of the text by hand
+    # would otherwise leave the two disagreeing with no way to tell which won.
+    scope: tuple[str, ...] = ()
+
+    # The text that was really embedded and really shown to the model: `question` with the
+    # tags removed. `@611` is not a word the corpus ever says, so leaving it in moves the
+    # query vector for nothing.
+    query: str = ""
+
+    @property
+    def scoped(self) -> bool:
+        return bool(self.scope)
+
     @property
     def valid(self) -> bool:
         return self.answer is not None
@@ -104,54 +125,50 @@ class AnswerRun:
 
 
 def answer(question: str, cfg: Config, meter: Meter) -> AnswerRun:
-    """Retrieve, ask, validate, ground. Never raises on a bad model reply.
+    """Scope, retrieve, ask, validate, ground. Never raises on a bad model reply.
 
     A model that returns unparseable JSON is a result the gate has to be able to count, not
     an exception that stops the run halfway through the dev set — so the failure is carried
     in `AnswerRun.error` and only genuine infrastructure faults (no key, no index, no model)
     raise `AnswerError`.
+
+    A question may tag its sources — `"@611 what two tools do I need?"` — and then retrieval
+    sees video 611 and nothing else. That is parsed here, once, rather than at each entry
+    point, so `make answer`, `make ask`, `make api` and the frontend all behave the same way
+    because they run the same code. An unresolvable tag raises `MentionError`: the caller's
+    input is what is wrong, not the pipeline, and quietly widening the search back to the
+    whole index would answer a question nobody asked.
     """
-    hits = retrieve(question, cfg, meter)
+    scope = parse_scope(question, cfg)
+    hits = retrieve(scope.text, cfg, meter, video_ids=scope.video_ids)
     with meter.stage("answer.prompt"):
-        system, user = build_messages(question, hits, cfg)
+        system, user = build_messages(scope.text, hits, cfg)
 
     raw, tokens, used = _ask(system, user, cfg, meter)
+
+    def run(**kw) -> AnswerRun:
+        return AnswerRun(
+            question=question,
+            hits=hits,
+            raw=raw,
+            tokens=tokens,
+            model=used,
+            scope=scope.video_ids,
+            query=scope.text,
+            **kw,
+        )
 
     try:
         parsed = Answer.model_validate_json(raw)
     except ValidationError as exc:
-        return AnswerRun(
-            question=question,
-            hits=hits,
-            raw=raw,
-            answer=None,
-            error=_terse(exc),
-            tokens=tokens,
-            model=used,
-        )
+        return run(answer=None, error=_terse(exc))
     except ValueError as exc:
         # Not JSON at all. Same class of result as a validation failure: countable, not fatal.
-        return AnswerRun(
-            question=question,
-            hits=hits,
-            raw=raw,
-            answer=None,
-            error=f"not valid JSON: {exc}",
-            tokens=tokens,
-            model=used,
-        )
+        return run(answer=None, error=f"not valid JSON: {exc}")
 
     with meter.stage("answer.ground"):
         grounded, repairs = ground(parsed, hits)
-    return AnswerRun(
-        question=question,
-        hits=hits,
-        raw=raw,
-        answer=grounded,
-        repairs=repairs,
-        tokens=tokens,
-        model=used,
-    )
+    return run(answer=grounded, repairs=repairs)
 
 
 def build_messages(
@@ -517,6 +534,10 @@ def load_dev_pairs(dev_dir: Path = DEV_DIR) -> list[dict]:
 def report(run: AnswerRun, out=None) -> None:
     out = out or sys.stdout
     print(f"\nQ: {run.question}", file=out)
+    if run.scoped:
+        # Printed whenever it applies, because the alternative is an answer that cites
+        # one video with no sign on screen that the others were never eligible.
+        print(f"   scope: {', '.join('video ' + v for v in run.scope)} only", file=out)
     if run.answer is None:
         print(f"   SCHEMA-INVALID  {run.error}", file=out)
         print(f"   raw: {run.raw[:300]}", file=out)
