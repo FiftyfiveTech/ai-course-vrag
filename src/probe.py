@@ -3,6 +3,7 @@
     make probe                              # the starter set
     make probe QUESTIONS=my_questions.txt   # your own
     echo "what tools do I need" | uv run python -m src.probe -
+    echo "@611 what tools do I need" | uv run python -m src.probe -   # one video only
 
 Throw unlabelled questions at the index and look at what comes back. One question per
 line in a .txt (blank lines and `#` comments skipped), or a .jsonl whose objects carry a
@@ -34,6 +35,7 @@ from pathlib import Path
 
 from src.config import Config
 from src.config import load as load_config
+from src.mention import scope as parse_scope
 from src.retrieve import RetrievedChunk, retrieve
 from src.telemetry import Meter
 
@@ -122,11 +124,23 @@ def cite(hit: RetrievedChunk, urls: dict[str, str]) -> str:
     )
 
 
-def report(question: str, hits: list[RetrievedChunk], urls: dict[str, str], out=None) -> None:
+def report(
+    question: str,
+    hits: list[RetrievedChunk],
+    urls: dict[str, str],
+    out=None,
+    scope: str = "",
+) -> None:
     out = out or sys.stdout
     print(f"\nQ: {question}", file=out)
+    if scope:
+        print(f"   scope: {scope} only", file=out)
     if not hits:
-        print("   (nothing in the index - run `make index-dev`)", file=out)
+        print(
+            f"   (nothing in the index for {scope})" if scope
+            else "   (nothing in the index - run `make index-dev`)",
+            file=out,
+        )
         return
     for rank, hit in enumerate(hits, start=1):
         print(f"  {rank}. {cite(hit, urls)}", file=out)
@@ -134,12 +148,20 @@ def report(question: str, hits: list[RetrievedChunk], urls: dict[str, str], out=
 
 
 def probe(questions: list[str], cfg: Config, meter: Meter, out=None) -> list[list]:
-    """Retrieve for each question and print the hits. Returns the hits per question."""
+    """Retrieve for each question and print the hits. Returns the hits per question.
+
+    `@source` tags are honoured here for the same reason they exist at all: this is
+    the tool for reading what retrieval did, and a scope that worked in `make ask` and
+    was ignored here would make this the wrong place to debug it. An unresolvable tag
+    raises `MentionError` and stops the file — a probe that silently searched
+    everything would print thirty results that answer a different question.
+    """
     urls = video_urls()
     results = []
     for question in questions:
-        hits = retrieve(question, cfg, meter)
-        report(question, hits, urls, out)
+        scope = parse_scope(question, cfg)
+        hits = retrieve(scope.text, cfg, meter, video_ids=scope.video_ids)
+        report(question, hits, urls, out, scope=scope.describe() if scope.scoped else "")
         results.append(hits)
     return results
 

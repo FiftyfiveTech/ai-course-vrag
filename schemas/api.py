@@ -52,7 +52,13 @@ class AskRequest(BaseModel):
     question: str = Field(
         min_length=1,
         max_length=1000,
-        description="the question to answer against the indexed videos",
+        description=(
+            "the question to answer against the indexed videos. Tag a source with `@` "
+            "— `@611 what two tools do I need?` — and retrieval is restricted to that "
+            "video and no other; `GET /videos` lists the handles. Several tags widen "
+            "the scope to their union. A tag that names nothing indexed is a 422, not a "
+            "silent search of everything."
+        ),
     )
 
 
@@ -125,6 +131,22 @@ class Provenance(BaseModel):
     embed_model: str
     top_k: int
     retrieved: int = Field(description="passages actually returned by retrieval")
+    scope: list[str] = Field(
+        default_factory=list,
+        description=(
+            "video_ids retrieval was restricted to by the question's `@` tags. Empty "
+            "means the whole index was searched, which is the default. Here rather "
+            "than beside `answer`, because it is one of the things that has to be "
+            "known to re-run the question and get the same result."
+        ),
+    )
+    query: str = Field(
+        default="",
+        description=(
+            "the text actually embedded and shown to the model: the question with its "
+            "`@` tags removed. Equal to `question` when nothing was tagged."
+        ),
+    )
     prompt: str
     prompt_sha256: str
     config: str
@@ -189,9 +211,28 @@ class Health(BaseModel):
 
 
 class Video(BaseModel):
-    """`GET /videos` — one cited-or-citable video and where it can be watched."""
+    """`GET /videos` — one cited-or-citable video, where it can be watched, and how to tag it.
+
+    This is also the source list an `@` picker is built from, which is why `handle`,
+    `label` and `aliases` are here: a frontend that offered `video_id` alone would be
+    offering a column of bare decimal strings, and the person picking one has no way to
+    tell 611 from 701. Only `indexed` sources can be tagged — the others are listed so a
+    picker can show them greyed with a reason rather than pretend they do not exist.
+    """
 
     video_id: str
+    handle: str = Field(
+        default="",
+        description="what to type after the `@` in a question. The video_id.",
+    )
+    label: str = Field(
+        default="",
+        description="what the video is, from the manifest taxonomy; '' when nothing says",
+    )
+    aliases: list[str] = Field(
+        default_factory=list,
+        description="other things `@` accepts for this source: youtube id, fetched filename",
+    )
     split: str | None = Field(default=None, description="'dev' or 'heldout' per the manifest")
     indexed: bool = Field(description="whether the collection holds chunks for this video")
     stream_url: str | None = None

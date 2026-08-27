@@ -20,7 +20,8 @@ Endpoints
     GET  /                the frontend (web/), or a redirect to /docs without it
     GET  /health          is there an index, which arm, which config bytes
     POST /ask             question in, answer + citations + provenance out
-    GET  /videos          which videos are indexed, and where each can be watched
+    GET  /videos          which videos are indexed, where each can be watched, and the
+                          `@` handle that scopes a question to it
     GET  /media/{id}      the local media file, range-served so a player can seek
 
 Nothing here decides anything either. Retrieval is VRAG-016, generation and grounding are
@@ -95,6 +96,8 @@ from src.ask import (
 from src.config import Config, ConfigError
 from src.config import load as load_config
 from src.index import local_file
+from src.mention import MentionError, catalogue
+from src.mention import _numeric as _mention_numeric
 from src.retrieve import RetrieveError
 from src.telemetry import Meter
 
@@ -311,6 +314,8 @@ def provenance(run: AnswerRun, cfg: Config) -> Provenance:
         embed_model=str(cfg.get("embed.model")),
         top_k=int(cfg.get("retrieve.top_k")),
         retrieved=len(run.hits),
+        scope=list(run.scope),
+        query=run.query or run.question,
         prompt=prompt_path.as_posix(),
         prompt_sha256=prompt_sha,
         config=fingerprint["path"],
@@ -328,26 +333,33 @@ def videos(cfg: Config) -> list[Video]:
     """
     records = load_manifest()
     status = index_status(cfg)
-    indexed = set(status.videos)
+    # The same union, computed once by `src.mention` — the list a frontend puts behind
+    # `@` and the list this endpoint returns have to be the same list, or a handle the
+    # picker offers is a 422 when it is sent back. `indexed` is handed over rather than
+    # re-read: index_status already paid for the O(chunks) metadata scan.
     out = []
-    for video_id in sorted(set(records) | indexed, key=_numeric):
-        record = records.get(video_id) or {}
-        url = record.get("url") or None
+    for source in catalogue(indexed=status.videos, records=records, samples=SAMPLES):
+        record = records.get(source.video_id) or {}
         out.append(
             Video(
-                video_id=video_id,
-                split=record.get("split"),
-                indexed=video_id in indexed,
-                stream_url=media_url(video_id, cfg),
-                source_url=url,
+                video_id=source.video_id,
+                handle=source.handle,
+                label=source.label,
+                aliases=list(source.aliases),
+                split=source.split,
+                indexed=source.indexed,
+                stream_url=media_url(source.video_id, cfg),
+                source_url=record.get("url") or None,
             )
         )
     return out
 
 
-def _numeric(video_id: str) -> tuple[int, str]:
-    """Sort '9' before '10'. Corpus ids are decimal strings, so lexical order misleads."""
-    return (int(video_id), "") if video_id.isdigit() else (1 << 30, video_id)
+# Sort '9' before '10' — corpus ids are decimal strings, so lexical order misleads. One
+# definition, in src.mention, because that module orders the catalogue this endpoint now
+# returns; re-implementing it here is how the two would come to disagree about where a
+# non-decimal id like `bob-video` belongs.
+_numeric = _mention_numeric
 
 
 def resolve_media(video_id: str, cfg: Config, samples: Path | None = None) -> Path:
@@ -407,6 +419,8 @@ two urls. `stream_url` is media on this host, range-served, so an in-page `<vide
 it. `source_url` is the original upload with the timestamp on it, and it is what a citation has
 when the media was never fetched here: this corpus is pointers, not copies. Either can be
 null; a citation with both null is still a real citation with nowhere to play it.
+
+**Scoping to one source.** Put an `@` tag in the question — `@611 what two tools do I need?` — and retrieval is filtered to that video before ranking, so nothing from any other video can be retrieved, cited or grounded onto. `GET /videos` lists the handles; several tags scope to their union; a tag naming nothing indexed comes back 422 rather than quietly searching everything. The tag is part of the question and not a parameter, which is why there is no field for it — and `provenance.scope` reports which videos the answer was actually confined to.
 
 **Levers are not request parameters.** Retrieval depth, the model, the prompt and the
 temperature live in `config.toml` and are reported back in `provenance` with a sha256 of the
@@ -513,6 +527,11 @@ def create_app(cfg: Config | None = None):
         response_model=AskResponse,
         tags=["ask"],
         responses={
+            422: {
+                "model": Problem,
+                "description": "a blank question, an unknown field, or an `@` tag that "
+                "names no indexed source",
+            },
             429: {
                 "model": Problem,
                 "description": "the free tier's daily budget — carries Retry-After",
@@ -546,6 +565,15 @@ def create_app(cfg: Config | None = None):
         with meter.request("POST /ask"):
             try:
                 run, cites, _ = ask(question, cfg, meter, write=False)
+            except MentionError as exc:
+                # `@nosuchvideo`. 422 and not 503: the server is fine and retrying will not
+                # help — the request named a source that cannot be answered from, and the
+                # message already lists the ones that can. Answering it as an unscoped
+                # question instead would be the one wrong move: the reply would cite
+                # whatever it liked and nothing on screen would say the scope was dropped.
+                raise ApiError(
+                    422, str(exc), "GET /videos lists every handle `@` accepts"
+                ) from exc
             except AskError as exc:
                 # Chiefly the empty index. `src.ask` refuses rather than answering from nothing.
                 raise ApiError(503, str(exc), "make index-dev") from exc

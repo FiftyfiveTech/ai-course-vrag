@@ -23,6 +23,7 @@ other person as a collaborator with push access.
 | `samples/` | Sample videos, **generated or fetched, never committed**. `make sample` writes a synthetic clip; `make sample-real VIDEO_ID=…` pulls one dev video from its manifest url; `make sample-broken` writes the five failure fixtures. |
 | `runs/` | Ingest output, one directory per video: `audio.wav`, `frames/`, `media.json`; and `runs/ask/`, the demo pages `make ask` writes. Gitignored. |
 | `data/corpus/` | The 10-video pilot corpus: **pointers only**, never media. `manifest.json` + `PROVENANCE.md` (licence, provenance, how the split was chosen). |
+| `src/mention.py` | `@source` tagging: the handles a question can name, and the Chroma filter they become. `make sources` lists them. |
 | `prompts/` | Versioned prompt files. `answer_v1.md` is the Phase 2 answering prompt; its `## System` / `## User` sections are the messages, the rest is commentary. Never inline a prompt in code. |
 | `schemas/` | Pydantic models. `answer.py` is the `{answer, citations[], abstain}` contract — one declaration, used both to constrain generation and to validate the reply. `api.py` is the HTTP contract `make api` serves and `/docs` renders. |
 | `web/` | The frontend `make api` serves at `/` — three static files, no build step. Same origin as the API, so a citation's root-relative `stream_url` resolves and no CORS entry is needed. |
@@ -510,6 +511,136 @@ is what makes the url printed above a *timestamp* and not just a link to a page.
 `src/ask.py` decides nothing. `src/answer.py` has already retrieved, generated against
 `schemas/answer.py` and grounded every citation onto a passage that was really retrieved; the
 demo renders that. A bug in the answer belongs to VRAG-019, a bug in the link belongs here.
+
+### `@source`: answer from one video and no other
+
+A question that tags a source is answered from that source alone.
+
+```bash
+make sources                                   # what @ accepts on this host
+make ask Q="@611 how old was Bernini when he first met the Pope?"
+```
+
+```
+Q: @611 how old was Bernini when he first met the Pope?
+
+   scope: video 611 only (the rest of the index was not searched)
+
+   A: He was eight years old.
+```
+
+`make sources` prints the handles, and prints what is *not* taggable too, because "why does
+`@091` not work" is the question it exists to answer:
+
+```
+Tag any of these in a question to answer from it alone:
+
+  @181          Artistic Performance / Stage Play      (dev, indexed)
+      also: @8np5YKYx3sU, @181_8np5YKYx3sU
+  @521          Life Record / Handicraft               (dev, indexed)
+  @611          Knowledge / Literature & Art           (dev, indexed)
+  @701          Film & Television / Movie & TV Show    (dev, indexed)
+
+In the corpus but not in the index, so not taggable:
+
+  @091          Film & Television / Animation          (heldout, NOT indexed)
+  ...
+```
+
+The handle is the `video_id`; the youtube id and the fetched filename work too, because the
+thing being tagged is, to the person typing, a file. Several tags scope to their union.
+Matching is case-insensitive. `make answer`, `make ask`, `make probe`, `POST /ask` and the
+frontend all take it, because it is parsed in exactly one place — `src/answer.py` calls
+`src.mention.scope()` before it retrieves, so there is no entry point where the tag means
+something different.
+
+#### It is a filter on the store, not a hint to the embedder
+
+The cheap version of this feature is to leave `@611` in the question text and let the
+embedder prefer chunks from video 611. That is a different feature. It changes which chunks
+*score* well, not which chunks are *eligible*, so a strongly-worded passage from another
+video still outranks the right one and the answer cites a source the question excluded.
+
+So the tag becomes a Chroma metadata filter, applied before ranking:
+
+```python
+collection.query(..., where={"video_id": {"$in": ["611"]}})
+```
+
+Measured against the live index, same question, same code, only the tag changed:
+
+```
+unscoped:       521@13.8s  521@0.0s  521@42.7s  521@31.3s  521@81.1s
+@611:           611@1516.4s  611@1509.3s  611@1477.3s  611@1290.5s  611@474.0s
+```
+
+Every top-5 slot went to 521 unscoped. A post-filter on those five results would have
+returned **nothing** for `@611` — the excluded videos are exactly the ones that outranked it.
+That is the whole reason the filter goes to the store.
+
+The tag is also removed from the text before it is embedded (`Scope.text`). `@611` is not a
+word the corpus ever says, so leaving it in moves the query vector for nothing.
+
+#### An unresolvable tag is refused, not ignored
+
+```
+$ make ask Q="@bernini how old was he?"
+FAIL - no source is tagged @bernini.
+Tag one of these:
+  @181          Artistic Performance / Stage Play      (dev, indexed)
+  @521          Life Record / Handicraft               (dev, indexed)
+  ...
+```
+
+Falling back to "search everything" is the one outcome worth avoiding: the answer would look
+scoped, cite whatever it liked, and nothing on screen would say the scope had been dropped.
+A truncated handle gets a suggestion (`@61` → "Did you mean @611?") unless more than one
+source matches, because a near-miss suggestion that is merely *close* would be taken.
+
+A source in the manifest but not in the index is refused separately, and says which it is:
+scoping to it would retrieve nothing and read as "the corpus does not cover this", which is a
+different claim from "that video was never indexed". Held-out videos get their own message
+and are never suggested — they are sealed (CLAUDE.md), and telling someone to run
+`make sample-real` on one would be telling them to break the seal.
+
+#### Over HTTP, and in the frontend
+
+`POST /ask` takes the tag inside `question` — there is no new field, because the tag is part
+of the question and not a lever (`AskRequest` still forbids extras). The scope comes back on
+`provenance.scope`, next to the config digest, since it is one of the things you need to know
+to re-run the question and get the same answer. An unresolvable tag is a **422**, not a 503:
+the server is fine and retrying will not help.
+
+In `web/`, typing `@` opens a picker over `GET /videos`. It lists only sources the index
+holds — a handle the menu offered and `/ask` then refused would be a control that looks live
+and is not — narrows as you type, and inserts on click or Enter. Arrow keys move the
+highlight, Escape closes it, and Enter is swallowed while it is open so a half-typed handle
+is never sent as a question. Matching is ranked rather than filtered, and that came out of a
+measurement: with a flat substring match over handle, label and aliases, typing `@5` offered
+video **181** above 521, because 181 matched on the `5` buried in its youtube id
+`8np5YKYx3sU` — and Enter would then have scoped the question to a video the user had not
+begun to type. A handle prefix now outranks a handle substring, which outranks an alias
+prefix, which outranks a label hit; an alias only matches from its start.
+
+A picked tag is **highlighted in the input box**. An `<input>` cannot style part of its own
+value, so the value is painted a second time in a div behind the input, with each tag wrapped
+in a pill, and the input's own glyphs are made transparent while its caret is left visible.
+Everything about the pill is metric-neutral — the padding is `box-shadow` spread, never real
+padding or a border — because a tag one pixel wider than its characters slides the rest of
+the question out from under the caret. A tag that names nothing indexed is drawn flagged
+rather than plain, so a 422 is visible before Enter rather than after it; before `GET /videos`
+answers there is nothing to judge against, and tags are drawn in a third, neutral state
+instead of all flashing red for the first frame.
+
+Only aliases that actually parse as a tag are advertised anywhere. Dev video 701's youtube id
+is `-dfvdKf-KR0`, and `@-dfvdKf-KR0` does not parse — a handle begins with a letter or a
+digit — so it is filtered out of `make sources` and out of the picker rather than offered as
+a name that resolves to nothing.
+
+What the answer was scoped to is shown on the answer itself, in all three surfaces (the
+terminal, the `make ask` page, and the frontend). A scoped answer cites one video and is
+indistinguishable by eye from an unscoped answer that happened to cite one; the difference is
+whether the others were ever eligible.
 
 ### Pointers, not copies — and the player has to survive that
 

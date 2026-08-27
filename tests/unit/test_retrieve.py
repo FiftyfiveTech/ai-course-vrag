@@ -19,8 +19,10 @@ from src.retrieve import (
     _is_hit,
     _load_dev_pairs,
     _parse_query_results,
+    _query,
     recall_at_k,
     retrieve,
+    where,
 )
 from src.telemetry import Meter
 
@@ -267,3 +269,75 @@ def test_recall_at_k_partial(cfg, meter, dev_dir):
     with patch("src.retrieve.retrieve", side_effect=fake_retrieve):
         score = recall_at_k(cfg, meter, dev_dir=dev_dir)
     assert score == 0.5
+
+
+# ---------------------------------------------------------------------------
+# Scoping to a set of videos — what an `@source` tag becomes (src/mention.py)
+# ---------------------------------------------------------------------------
+
+
+def test_no_scope_is_no_filter():
+    # None and empty both mean the whole index. A `{"video_id": {"$in": []}}` sent to Chroma
+    # would match nothing, which is the opposite of what "unscoped" means.
+    assert where(None) is None
+    assert where([]) is None
+    assert where([""]) is None
+
+
+def test_one_video_is_still_an_in_clause():
+    # One filter shape for one tag and for five: a `{"video_id": "611"}` shortcut for the
+    # common case is a second thing to keep true for no gain.
+    assert where(["611"]) == {"video_id": {"$in": ["611"]}}
+
+
+def test_several_videos_scope_to_their_union():
+    assert where(["611", "181"]) == {"video_id": {"$in": ["611", "181"]}}
+
+
+def test_the_scope_reaches_the_store_and_not_a_post_filter(cfg, meter):
+    # The distinction the whole feature rests on. A filter applied after ranking would take
+    # the top 5 and drop the ones from other videos, which returns fewer than 5 and often
+    # zero — the excluded videos are exactly the ones that outranked the wanted one.
+    with patch("src.retrieve._embed_question", return_value=[0.1] * 768), \
+         patch("src.retrieve._query", return_value=[]) as mock_q:
+        retrieve("question", cfg, meter, video_ids=["611"])
+    assert mock_q.call_args.kwargs["where"] == {"video_id": {"$in": ["611"]}}
+
+
+def test_an_unscoped_query_sends_no_filter(cfg, meter):
+    with patch("src.retrieve._embed_question", return_value=[0.1] * 768), \
+         patch("src.retrieve._query", return_value=[]) as mock_q:
+        retrieve("question", cfg, meter)
+    assert mock_q.call_args.kwargs["where"] is None
+
+
+def test_the_where_clause_is_left_off_the_chroma_call_entirely_when_there_is_none(tmp_path):
+    # Not `where=None`: chromadb has treated an explicit null filter differently from an
+    # absent one across versions, and the unscoped path is every question anyone has asked
+    # so far — it must go down the call it has always gone down.
+    calls = {}
+
+    class FakeCollection:
+        def count(self):
+            return 10
+
+        def query(self, **kwargs):
+            calls.update(kwargs)
+            return {"documents": [[]], "metadatas": [[]], "distances": [[]]}
+
+    class FakeClient:
+        def __init__(self, path):
+            pass
+
+        def get_collection(self, name):
+            return FakeCollection()
+
+    chroma = tmp_path / "chroma"
+    chroma.mkdir()
+    with patch("chromadb.PersistentClient", FakeClient):
+        _query([0.1] * 768, 5, chroma, "vrag", where=None)
+    assert "where" not in calls
+
+    with patch("chromadb.PersistentClient", FakeClient):
+        _query([0.1] * 768, 5, chroma, "vrag", where={"video_id": {"$in": ["611"]}})
+    assert calls["where"] == {"video_id": {"$in": ["611"]}}

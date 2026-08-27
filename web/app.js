@@ -18,7 +18,14 @@
  *      anything else is an answer. Collapsing them into "it worked" would report a bug that
  *      is not there, or hide one that is.
  *
- *   3. A citation is rendered as what it can actually do. stream_url -> a button that seeks
+ *   3. An @ tag is a filter, not a hint. The menu offers only sources GET /videos says
+ *      are indexed, because a handle this page suggests and /ask then refuses with a 422
+ *      is a control that looks live and is not — the same failure as rule 4 below, moved
+ *      one step earlier. What the answer was scoped to is then shown on the answer, not
+ *      only in the question the user typed: a scoped answer cites one video and looks
+ *      exactly like an unscoped answer that happened to.
+ *
+ *   4. A citation is rendered as what it can actually do. stream_url -> a button that seeks
  *      the in-page player; source_url only -> a link that leaves; neither -> plain text that
  *      says so. A dead control that looks live is the failure worth avoiding.
  */
@@ -35,6 +42,8 @@
   var statusText = document.getElementById('status-text');
   var footConfig = document.getElementById('foot-config');
   var examplesEl = document.getElementById('examples');
+  var mentionsEl = document.getElementById('mentions');
+  var highlightEl = document.getElementById('qhl');
 
   var EXAMPLES = [
     'What two tools do I need to make my first paper cut?',
@@ -43,6 +52,11 @@
   ];
 
   var busy = false;
+
+  /* Sources that can be tagged with @, from GET /videos. Indexed ones only: the menu is
+     a promise that what it offers can be asked. */
+  var SOURCES = [];
+  var menu = { open: false, items: [], active: 0 };
 
   // ---------------------------------------------------------------- helpers
 
@@ -114,9 +128,266 @@
     return bubble;
   }
 
+  // ------------------------------------------------------- the @ source picker
+
+  /**
+   * The tag being typed at the caret, or null.
+   *
+   * Anchored to the caret and not to the whole string, so editing the front of a question
+   * that already carries a tag does not reopen the menu on it. The leading class mirrors
+   * src/mention.py's MENTION lookbehind — a tag starts the value or follows whitespace or an
+   * opening bracket — which is what keeps an email address out of the picker and, more to
+   * the point, keeps this page and the server agreeing on what a tag is.
+   */
+  var AT_CARET = /(?:^|[\s(\[{])@([A-Za-z0-9][A-Za-z0-9_-]*|)$/;
+
+  /* The same rule over the whole value rather than at the caret — what the highlighter
+     paints. Kept beside AT_CARET so the two cannot drift: a tag the picker completes and
+     the highlighter does not draw would be the two halves disagreeing on screen. Both
+     mirror src/mention.py's MENTION, including that a handle starts with a letter or a
+     digit — which is why `@-dfvdKf-KR0` is not a tag anywhere. */
+  var MENTION_ALL = /(^|[\s(\[{])@([A-Za-z0-9][A-Za-z0-9_-]*)/g;
+
+  function tokenAtCaret() {
+    var pos = input.selectionStart;
+    if (pos === null || pos === undefined) { return null; }
+    var found = AT_CARET.exec(input.value.slice(0, pos));
+    if (!found) { return null; }
+    return { query: found[1], at: pos - found[1].length - 1, caret: pos };
+  }
+
+  /**
+   * Sources matching what has been typed, best first. -1 means no match.
+   *
+   * Ranked and not merely filtered, because the top row is what Enter takes and a plain
+   * filter puts whatever the catalogue happened to list first there. Measured: with a flat
+   * `indexOf` over handle, label and aliases, typing `@5` offered video 181 above 521 — 181
+   * matched on the `5` buried in its youtube id `8np5YKYx3sU`, and Enter then scoped the
+   * question to a video the user had not begun to type.
+   *
+   * So an alias has to match from its *start* rather than anywhere inside it. An alias is a
+   * name you type from the front (a youtube id, a filename); a substring hit in the middle
+   * of one is a coincidence, and the two ranks above it exist so that a coincidence can
+   * never outrank the handle someone is actually spelling out.
+   */
+  function rank(source, q) {
+    var handle = source.handle.toLowerCase();
+    if (handle.indexOf(q) === 0) { return 0; }
+    if (handle.indexOf(q) > 0) { return 1; }
+    var aliases = source.aliases || [];
+    for (var i = 0; i < aliases.length; i++) {
+      if (aliases[i].toLowerCase().indexOf(q) === 0) { return 2; }
+    }
+    if ((source.label || '').toLowerCase().indexOf(q) >= 0) { return 3; }
+    return -1;
+  }
+
+  function matches(query) {
+    var q = query.toLowerCase();
+    if (!q) { return SOURCES.slice(0, 8); }
+    return SOURCES
+      .map(function (s) { return { s: s, r: rank(s, q) }; })
+      .filter(function (m) { return m.r >= 0; })
+      // Stable on rank: within one rank the catalogue's own order stands, which is video_id
+      // ascending, so the menu does not reshuffle between keystrokes.
+      .sort(function (a, b) { return a.r - b.r; })
+      .map(function (m) { return m.s; })
+      .slice(0, 8);
+  }
+
+  // --------------------------------------------------- painting the tags
+
+  /**
+   * Is this handle one `/ask` will accept? SOURCES holds the indexed sources and nothing
+   * else, so membership here is exactly the set src.mention.resolve() will not refuse.
+   * Trailing `-`/`_` is trimmed first because the server trims it too.
+   */
+  function known(token) {
+    var t = token.replace(/[-_]+$/, '').toLowerCase();
+    if (!t) { return false; }
+    return SOURCES.some(function (s) {
+      if (s.handle.toLowerCase() === t) { return true; }
+      return (s.aliases || []).some(function (a) { return a.toLowerCase() === t; });
+    });
+  }
+
+  /**
+   * Redraw the mirror under the input: the same characters, with each @tag in a pill.
+   *
+   * Built node by node, never innerHTML — this is the question someone typed and rule 1 at
+   * the top of this file applies to it more than to anything else on the page.
+   *
+   * The invariant worth stating: the mirror's text is character-for-character the input's
+   * value. It is what the reader actually sees, so a dropped or duplicated character here is
+   * not a cosmetic bug, it is the page lying about what is in the box. `matchIndex` walking
+   * with `lastIndex` is what keeps the untagged runs whole.
+   */
+  function renderHighlight() {
+    if (!highlightEl) { return; }
+    var value = input.value;
+    highlightEl.textContent = '';
+
+    var at = 0;
+    var found;
+    MENTION_ALL.lastIndex = 0;
+    while ((found = MENTION_ALL.exec(value)) !== null) {
+      // found[1] is the character before the @ (or ''), and belongs to the plain run.
+      var start = found.index + found[1].length;
+      if (start > at) {
+        highlightEl.appendChild(document.createTextNode(value.slice(at, start)));
+      }
+      var text = value.slice(start, MENTION_ALL.lastIndex);
+      // Nothing loaded yet is not the same as "no such source", so it gets its own state
+      // instead of being drawn as a mistake the user has not made.
+      var state = !SOURCES.length ? ' pending' : (known(found[2]) ? '' : ' unknown');
+      highlightEl.appendChild(el('span', 'tag' + state, text));
+      at = MENTION_ALL.lastIndex;
+    }
+    if (at < value.length) {
+      highlightEl.appendChild(document.createTextNode(value.slice(at)));
+    }
+
+    // The mirror does not scroll itself: it is one line of `pre` in an overflow-hidden box,
+    // so it has to be dragged to wherever the input has scrolled to or the two part company
+    // as soon as the question is longer than the pill.
+    highlightEl.scrollLeft = input.scrollLeft;
+  }
+
+  function syncScroll() {
+    if (highlightEl) { highlightEl.scrollLeft = input.scrollLeft; }
+  }
+
+  function closeMenu() {
+    menu.open = false;
+    menu.items = [];
+    menu.active = 0;
+    if (!mentionsEl) { return; }
+    mentionsEl.hidden = true;
+    mentionsEl.textContent = '';
+    input.setAttribute('aria-expanded', 'false');
+  }
+
+  function refreshMenu() {
+    // No #mentions in the DOM means this page was served before the picker existed — a tab
+    // left open across a server restart, which is exactly how this was first reported as
+    // "typing shows no list". Without the guard every keystroke throws a TypeError out of
+    // the input handler, which is a worse version of the same symptom and harder to read.
+    if (!mentionsEl) { return; }
+    var token = tokenAtCaret();
+    if (!token || !SOURCES.length) { closeMenu(); return; }
+    menu.items = matches(token.query);
+    menu.active = 0;
+    menu.open = true;
+    input.setAttribute('aria-expanded', 'true');
+    drawMenu(token);
+  }
+
+  function drawMenu(token) {
+    mentionsEl.textContent = '';
+    mentionsEl.hidden = false;
+
+    if (!menu.items.length) {
+      // Said, not silently closed. A menu that vanishes as you type reads as "this feature is
+      // broken"; this reads as "that is not one of the sources", which is the true thing.
+      mentionsEl.appendChild(el('div', 'mention-empty',
+        'no indexed source matches @' + token.query));
+      return;
+    }
+
+    menu.items.forEach(function (source, i) {
+      var row = el('button', 'mention' + (i === menu.active ? ' active' : ''));
+      row.type = 'button';
+      row.setAttribute('role', 'option');
+      row.setAttribute('aria-selected', i === menu.active ? 'true' : 'false');
+      row.appendChild(el('span', 'at', '@'));
+      row.appendChild(el('span', 'mhandle', source.handle));
+      row.appendChild(el('span', 'mlabel', source.label || 'indexed on this host'));
+      if (source.split) { row.appendChild(el('span', 'msplit', source.split)); }
+      // mousedown, not click, for the preventDefault: the click that picks a source must not
+      // blur the input first, or the caret position this insert is measured against is gone.
+      row.addEventListener('mousedown', function (event) { event.preventDefault(); });
+      row.addEventListener('click', function () { choose(source); });
+      mentionsEl.appendChild(row);
+    });
+  }
+
+  function move(delta) {
+    if (!menu.items.length) { return; }
+    menu.active = (menu.active + delta + menu.items.length) % menu.items.length;
+    var rows = mentionsEl.querySelectorAll('.mention');
+    for (var i = 0; i < rows.length; i++) {
+      rows[i].classList.toggle('active', i === menu.active);
+      rows[i].setAttribute('aria-selected', i === menu.active ? 'true' : 'false');
+    }
+    if (rows[menu.active]) { rows[menu.active].scrollIntoView({ block: 'nearest' }); }
+  }
+
+  function choose(source) {
+    var token = tokenAtCaret();
+    if (!token) { closeMenu(); return; }
+    var insert = '@' + source.handle + ' ';
+    var before = input.value.slice(0, token.at);
+    var after = input.value.slice(token.caret);
+    input.value = before + insert + after;
+    var caret = before.length + insert.length;
+    input.setSelectionRange(caret, caret);
+    closeMenu();
+    // Assigning .value fires no input event, so the mirror would keep painting the
+    // half-typed handle the menu was opened on.
+    renderHighlight();
+    input.focus();
+    syncScroll();
+  }
+
+  input.addEventListener('input', function () { renderHighlight(); refreshMenu(); });
+  input.addEventListener('click', function () { syncScroll(); refreshMenu(); });
+  input.addEventListener('scroll', syncScroll);
+  // keyup and not keydown: the caret has moved by then, so the mirror follows an arrow
+  // key that scrolled the input without changing a character.
+  input.addEventListener('keyup', syncScroll);
+  input.addEventListener('blur', closeMenu);
+
+  input.addEventListener('keydown', function (event) {
+    if (!menu.open) { return; }
+    if (event.key === 'Escape') { closeMenu(); event.preventDefault(); return; }
+    if (event.key === 'ArrowDown') { move(1); event.preventDefault(); return; }
+    if (event.key === 'ArrowUp') { move(-1); event.preventDefault(); return; }
+    // Enter picks the highlighted source instead of submitting. That is the one keystroke
+    // worth being careful about: with the menu open, Enter meaning "ask" would send a
+    // half-typed handle — "@6" — which is a 422 the user did not type on purpose.
+    if ((event.key === 'Enter' || event.key === 'Tab') && menu.items.length) {
+      choose(menu.items[menu.active]);
+      event.preventDefault();
+    }
+  });
+
+  function loadSources() {
+    return fetch('/videos')
+      .then(function (r) { return r.json(); })
+      .then(function (list) {
+        // `v.handle` is required, not assumed. An API older than the picker answers /videos
+        // without it, and `rank()` would then call .toLowerCase() on undefined and throw out
+        // of the input handler on the first keystroke — a dead menu with the cause buried in
+        // the console. Dropping the row instead degrades to "nothing to offer", which is
+        // true of an API that cannot tell this page what to type.
+        SOURCES = (list || []).filter(function (v) { return v && v.indexed && v.handle; });
+        // A tag typed (or arriving in ?q=) before this resolved was drawn `pending`.
+        renderHighlight();
+      })
+      .catch(function () { SOURCES = []; });
+  }
+
   // ------------------------------------------------------------------ boot
 
   function boot() {
+    // The class, and therefore the transparent input text, is added only once the mirror
+    // is known to be on the page. A checkout served before the highlighter existed keeps
+    // an ordinary visible input rather than an empty-looking one.
+    if (highlightEl) {
+      input.classList.add('mirrored');
+      renderHighlight();
+    }
+
     EXAMPLES.forEach(function (question) {
       var chip = el('button', null, question);
       chip.type = 'button';
@@ -126,6 +397,8 @@
       });
       examplesEl.appendChild(chip);
     });
+
+    loadSources();
 
     fetch('/health')
       .then(function (r) { return r.json(); })
@@ -165,6 +438,7 @@
     var question = input.value.trim();
     if (!question || busy) { return; }
     input.value = '';
+    renderHighlight();
     ask(question);
   });
 
@@ -230,6 +504,16 @@
       reveal(bubble, data.answer);
     }
     turn.appendChild(bubble);
+
+    var scope = (data.provenance && data.provenance.scope) || [];
+    if (scope.length) {
+      // On the answer and not only in the question bubble. A scoped answer cites one video
+      // and is indistinguishable by eye from an unscoped answer that happened to cite one
+      // — and the difference is whether the others were ever eligible.
+      turn.appendChild(el('p', 'note scoped',
+        'Answered from ' + scope.map(function (v) { return 'video ' + v; }).join(', ') +
+        ' only — the rest of the index was not searched.'));
+    }
 
     if (data.abstain) {
       // QA_SPEC §4: a citation on a declined question is incorrect regardless of what it
@@ -428,6 +712,7 @@
 
     if (p.arm) { chip('arm', p.arm + ' · ' + p.answer_model); }
     if (p.top_k !== undefined) { chip('retrieved', p.retrieved + '/' + p.top_k); }
+    if (p.scope && p.scope.length) { chip('scope', p.scope.join(' '), 'scope'); }
     if (s.latency_s !== undefined) { chip('latency', s.latency_s + 's'); }
     if (s.cost_usd !== undefined) { chip('cost', '$' + Number(s.cost_usd).toFixed(6)); }
     if (p.config_sha256) {

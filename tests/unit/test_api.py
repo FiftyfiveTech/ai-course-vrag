@@ -126,7 +126,14 @@ def a_cite(
     )
 
 
-def a_run(answer_obj: Answer | None, hits=None, error=None, repairs=None) -> AnswerRun:
+def a_run(
+    answer_obj: Answer | None,
+    hits=None,
+    error=None,
+    repairs=None,
+    scope=(),
+    query="",
+) -> AnswerRun:
     return AnswerRun(
         question="q",
         hits=hits if hits is not None else [chunk()],
@@ -135,6 +142,8 @@ def a_run(answer_obj: Answer | None, hits=None, error=None, repairs=None) -> Ans
         error=error,
         repairs=repairs or [],
         tokens=10,
+        scope=tuple(scope),
+        query=query,
     )
 
 
@@ -563,6 +572,11 @@ def test_a_manifest_video_that_is_not_indexed_is_listed_as_such(tmp_path, monkey
     assert body == [
         {
             "video_id": "611",
+            # The @-picker half of the record: what to type, and what it is. Empty label here
+            # because this stub manifest has no taxonomy on it, which is the honest fallback.
+            "handle": "611",
+            "label": "",
+            "aliases": [],
             "split": "dev",
             "indexed": False,
             "stream_url": None,
@@ -775,3 +789,209 @@ def test_the_api_never_writes_a_page_to_disk(tmp_path, monkeypatch):
     client(write_config(tmp_path)).post("/ask", json={"question": "q"})
     after = set(Path("runs").glob("ask/*")) if Path("runs/ask").exists() else set()
     assert before == after
+
+
+# ---------------------------------------------------------------------------
+# `@source` — scoping a question to one video over the wire
+# ---------------------------------------------------------------------------
+
+
+def test_the_scope_comes_back_on_the_provenance(tmp_path, monkeypatch):
+    # Not beside `answer`: it is one of the things that has to be known to re-run the
+    # question and get the same result, which is what `provenance` is for.
+    stub_ask(monkeypatch, run=a_run(answered(), scope=("611",), query="how old?"))
+    body = client(write_config(tmp_path)).post("/ask", json={"question": "@611 how old?"}).json()
+    assert body["provenance"]["scope"] == ["611"]
+    assert body["provenance"]["query"] == "how old?"
+
+
+def test_an_unscoped_question_reports_an_empty_scope(tmp_path, monkeypatch):
+    stub_ask(monkeypatch, run=a_run(answered()))
+    body = client(write_config(tmp_path)).post("/ask", json={"question": "how old?"}).json()
+    assert body["provenance"]["scope"] == []
+
+
+def test_the_reported_query_falls_back_to_the_question(tmp_path, monkeypatch):
+    # A run built before there were tags — or by a test fake — has no `query`. Reporting an
+    # empty string there would say the model was shown nothing.
+    stub_ask(monkeypatch, run=a_run(answered()))
+    body = client(write_config(tmp_path)).post("/ask", json={"question": "how old?"}).json()
+    assert body["provenance"]["query"] == "q"
+
+
+def test_a_tag_that_names_no_indexed_source_is_a_422(tmp_path, monkeypatch):
+    # 422 and not 503: the server is fine, retrying will not help, and answering it as an
+    # unscoped question would cite whatever it liked with nothing saying the scope was lost.
+    from src.mention import MentionError
+
+    stub_ask_raising(monkeypatch, MentionError("no source is tagged @bernini."))
+    response = client(write_config(tmp_path)).post(
+        "/ask", json={"question": "@bernini how old?"}
+    )
+    assert response.status_code == 422
+    body = response.json()
+    assert "@bernini" in body["error"]
+    assert "/videos" in body["hint"]
+
+
+def test_the_422_uses_the_same_problem_shape_as_every_other_refusal(tmp_path, monkeypatch):
+    from src.mention import MentionError
+
+    stub_ask_raising(monkeypatch, MentionError("nope"))
+    body = client(write_config(tmp_path)).post("/ask", json={"question": "@x y"}).json()
+    assert set(body) == {"error", "hint"}
+
+
+def test_the_openapi_document_declares_the_422(tmp_path):
+    doc = client(write_config(tmp_path)).get("/openapi.json").json()
+    assert "422" in doc["paths"]["/ask"]["post"]["responses"]
+
+
+# ---- the picker's source list ---------------------------------------------
+
+
+def test_a_listed_video_carries_the_handle_to_type_after_the_at_sign(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "src.api.load_manifest",
+        lambda: {
+            "611": {
+                "video_id": "611",
+                "youtube_id": "H8fGd3fCJbg",
+                "url": "https://y/611",
+                "split": "dev",
+                "domain": "Knowledge",
+                "sub_category": "Literature & Art",
+            }
+        },
+    )
+    fake_index(monkeypatch, ["611"])
+    monkeypatch.setattr("src.api.SAMPLES", tmp_path / "samples")
+    row = client(write_config(tmp_path)).get("/videos").json()[0]
+    assert row["handle"] == "611"
+    assert row["label"] == "Knowledge / Literature & Art"
+    assert row["aliases"] == ["H8fGd3fCJbg"]
+
+
+def test_a_fetched_video_offers_its_filename_as_an_alias_too(tmp_path, monkeypatch):
+    # The thing being tagged is, to the person typing, a file. `src.mention` accepts the
+    # stem, so the list a picker is built from has to advertise it.
+    fake_media(tmp_path, "611")
+    monkeypatch.setattr(
+        "src.api.load_manifest",
+        lambda: {"611": {"video_id": "611", "url": "https://y/611", "split": "dev"}},
+    )
+    fake_index(monkeypatch, ["611"])
+    monkeypatch.setattr("src.api.SAMPLES", tmp_path / "samples")
+    row = client(write_config(tmp_path)).get("/videos").json()[0]
+    assert "611_abcdefgh" in row["aliases"]
+
+
+def test_the_endpoint_and_the_resolver_agree_on_what_is_taggable(tmp_path, monkeypatch):
+    # The failure this exists to catch: a handle the picker offers that /ask then refuses.
+    # Both sides read one catalogue, and this asserts they still do.
+    from src.mention import resolve
+
+    records = {
+        "611": {"video_id": "611", "url": "https://y/611", "split": "dev"},
+        "091": {"video_id": "091", "url": "https://y/091", "split": "heldout"},
+    }
+    monkeypatch.setattr("src.api.load_manifest", lambda: records)
+    fake_index(monkeypatch, ["611"])
+    monkeypatch.setattr("src.api.SAMPLES", tmp_path / "samples")
+
+    cfg = write_config(tmp_path)
+    listed = client(cfg).get("/videos").json()
+    offered = [v["handle"] for v in listed if v["indexed"]]
+    assert offered == ["611"]
+
+    from src.mention import catalogue
+
+    sources = catalogue(indexed=["611"], records=records, samples=tmp_path / "samples")
+    for handle in offered:
+        assert resolve(f"@{handle} what?", sources).video_ids == (handle,)
+
+
+def test_the_frontend_offers_only_sources_the_index_holds(tmp_path):
+    # web/app.js filters GET /videos on `indexed` before putting anything behind @. If that
+    # filter went away the menu would offer held-out videos, which /ask refuses by name.
+    js = (WEB / "app.js").read_text(encoding="utf-8")
+    assert "fetch('/videos')" in js
+    assert "v.indexed" in js
+
+
+# ---------------------------------------------------------------------------
+# The tag highlighter — three files that have to agree, asserted as a contract
+# ---------------------------------------------------------------------------
+#
+# An <input> cannot style part of its own value, so web/ paints the value a second time in a
+# div behind a transparent input and wraps each @tag in a pill. That trick spans index.html,
+# styles.css and app.js, and every one of its failure modes is silent: the text goes
+# invisible, or it drifts a pixel out from under the caret. These assert the joints.
+
+
+def test_the_page_carries_the_layer_the_tags_are_painted_on(tmp_path):
+    html = (WEB / "index.html").read_text(encoding="utf-8")
+    assert 'id="qhl"' in html
+    assert 'class="input-wrap"' in html
+    # aria-hidden: the input still holds the real text for a screen reader. Without it the
+    # question is announced twice.
+    assert 'class="highlight" id="qhl" aria-hidden="true"' in html
+
+
+def test_the_input_is_only_made_transparent_from_script(tmp_path):
+    # `mirrored` must never be in the markup. A checkout served before the highlighter
+    # existed, or one whose app.js failed to load, would then show an input that looks empty
+    # no matter what is typed into it.
+    html = (WEB / "index.html").read_text(encoding="utf-8")
+    js = (WEB / "app.js").read_text(encoding="utf-8")
+    assert "mirrored" not in html
+    assert "input.classList.add('mirrored')" in js
+    assert "if (highlightEl) {" in js
+
+
+def test_the_mirror_and_the_input_are_declared_with_the_same_metrics(tmp_path):
+    # The caret belongs to the input and the glyphs to the mirror, so any difference in font
+    # box shows up as a caret sitting between the wrong two letters. Both blocks declare the
+    # same line-height and the same padding, and this is the assertion that says so.
+    css = (WEB / "styles.css").read_text(encoding="utf-8")
+    field = css.split(".field input {", 1)[1].split("}", 1)[0]
+    mirror = css.split(".highlight {", 1)[1].split("}", 1)[0]
+    for metric in ("line-height: 22px;", "padding: 9px 0;", "font: inherit;"):
+        assert metric in field, f"{metric} missing from .field input"
+        assert metric in mirror, f"{metric} missing from .highlight"
+
+
+def test_the_pill_is_drawn_without_changing_the_glyph_run(tmp_path):
+    # box-shadow spread fakes the padding. Real padding or a real border on .tag would widen
+    # the run and slide every character after the tag out from under the caret.
+    css = (WEB / "styles.css").read_text(encoding="utf-8")
+    pill = css.split(".highlight .tag {", 1)[1].split("}", 1)[0]
+    assert "box-shadow:" in pill
+    assert "padding:" not in pill
+    assert "border:" not in pill
+    assert "margin:" not in pill
+
+
+def test_an_unresolvable_tag_is_flagged_before_it_is_sent(tmp_path):
+    # /ask answers it 422; finding that out by asking is a worse way to learn it.
+    css = (WEB / "styles.css").read_text(encoding="utf-8")
+    js = (WEB / "app.js").read_text(encoding="utf-8")
+    assert ".highlight .tag.unknown {" in css
+    assert ".highlight .tag.pending {" in css
+    assert "' unknown'" in js
+    # And "not loaded yet" is a third state, not a red flag on a tag the user got right.
+    assert "' pending'" in js
+
+
+def test_the_page_and_the_server_share_one_tag_grammar(tmp_path):
+    # web/ decides what to paint as a tag and src/mention.py decides what resolves. If the
+    # two disagree the page marks something valid as unknown, or completes a handle the
+    # server will not take. Both spell the handle the same way.
+    from src.mention import MENTION
+
+    js = (WEB / "app.js").read_text(encoding="utf-8")
+    assert "[A-Za-z0-9][A-Za-z0-9_-]*" in js
+    assert "[A-Za-z0-9][A-Za-z0-9_-]" in MENTION.pattern
+    # The leading context, too: a tag starts the value or follows whitespace or an opening
+    # bracket, which is what keeps an email address from being read as one.
+    assert "(^|[\\s(\\[{])@" in js
