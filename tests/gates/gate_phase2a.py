@@ -445,15 +445,25 @@ def test_cost_of_the_gate_is_printed(runs, cfg):
     meter: Meter = runs["meter"]
     calls = meter._calls
     tokens = sum(r.tokens for _, r in runs["rows"])
-    generation = [c for c in calls if c.model == cfg.get("answer.model")]
+    # Matched on the span's phase, not on its model name. `answer.model` is the model the
+    # *groq* arm is asked for; the ollama arm is sent `answer.ollama_model`, and src.answer
+    # falls back to it automatically on a Groq 429. So a model-name comparison reported
+    # "0 generation call(s)" and failed the assertion below whenever the fallback fired or
+    # the arm was local — a gate that goes red for a reason that is not the thing it
+    # measures. The phase label is what the arm cannot change.
+    generation = [c for c in calls if c.phase == "answer.generate"]
+    # The models actually called, not the ones configured. If the Groq fallback fired
+    # partway through, two models served this gate and the cost line has to say so —
+    # naming cfg's answer.model here would report a run that did not happen.
+    served = ", ".join(sorted({c.model for c in generation})) or "none"
     print(
         f"\ngate cost: {len(runs['rows'])} question(s), {len(generation)} generation call(s) "
-        f"({cfg.get('answer.model')}) + {len(calls) - len(generation)} embed call(s) "
+        f"({served}) + {len(calls) - len(generation)} embed call(s) "
         f"({cfg.get('embed.model')}), {tokens} tokens, "
         f"{sum(c.latency_s for c in calls):.2f}s, ${sum(c.cost_usd for c in calls):.4f}"
     )
     assert generation, (
-        "no call was logged against answer.model, so nothing went through the shared "
-        "cost/latency logger (CLAUDE.md: every model call does)"
+        "no call was logged under the answer.generate phase, so nothing went through the "
+        "shared cost/latency logger (CLAUDE.md: every model call does)"
     )
     assert tokens > 0, "no token volume recorded - the meter cannot show a tier change"

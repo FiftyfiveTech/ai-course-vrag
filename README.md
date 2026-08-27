@@ -30,6 +30,7 @@ other person as a collaborator with push access.
 | `evals/heldout/` | **Evaluator** only. Sealed Wednesday, tagged `heldout-v1`. The Builder never reads it. |
 | `evals/QA_SPEC.md` | What a correct citation is (±30 s), what counts as unanswerable, how the gate scores. |
 | `tests/gates/` | One script per phase gate. It prints the number; the number decides. |
+| `runs/telemetry/` | One JSONL per process: a span per model call and per instrumented stage. Read with `make latency`. Gitignored. |
 | `STANDUP.md` | Daily log. Two minutes, append-only. |
 
 ## The sealed evaluation set
@@ -334,6 +335,22 @@ one-pair wobble, and the 0.25 ceiling (3 of 12) is one pair of margin over the w
 
 ### The local arm is a different model, and its number is different
 
+**`answer.arm = "groq"` is the default.** The hosted arm is where the gate's number was
+measured, and it is 21× faster on the phase that dominates a run — same question, same index,
+same code, only the lever changed, measured with `make latency`:
+
+| `answer.arm` | `answer.generate` | share of run | whole run |
+|---|---|---|---|
+| `"groq"` | **1.166s** | 41.0% | 2.8s |
+| `"ollama"` | **24.657s** | 92.5% | 26.6s |
+
+Nothing else in the pipeline adds up to two seconds, so that line is the whole latency story.
+It sat on `"ollama"` for a while after a day when Groq's free tier ran out of tokens, with the
+config comment still claiming groq — which is how a leftover survives: the value moved and the
+reason it moved was never written down. Choosing groq does not mean a rate limit stops the
+demo; `src.answer._ask` falls back to `answer.ollama_model` automatically on a 429, so the
+fast path is the default and the slow one is the safety net.
+
 `answer.arm = "ollama"` runs the same four steps with no key and no network. It is not a
 formality — it works, and it is what a run with no credential falls back to:
 
@@ -372,13 +389,22 @@ It is not done here for one reason — it would make the VRAG-019 criterion (*sc
 100% of dev*) easier to pass, and 15/15 under a rule relaxed to reach it is not the same
 number. Flagged for review rather than decided quietly.
 
-This now has a direct consequence, because `answer.arm` defaults to `"ollama"`.
+This is one of the two reasons `answer.arm` defaults to `"groq"`.
 `tests/gates/gate_phase2a.py` pins `SCHEMA_VALID_THRESHOLD = 1.00` and reads `config.toml`
-directly — there is no arm override on the command line — so **`make gate-phase2a` must be
-run with `answer.arm = "groq"`**, which is where the VRAG-019 number was measured. The table
-above is why: 12/15 does not clear a 1.00 threshold. The local default is right for
-`make demo` and `make api`, which need an arm that answers without a key or a daily cap, and
-wrong for the gate, which needs the arm the criterion was measured on.
+directly — there is no arm override on the command line — and the table above is why that
+matters: 12/15 does not clear a 1.00 threshold. Measured both ways:
+
+| `answer.arm` | `gate_phase2a` | `make gate` |
+|---|---|---|
+| `"ollama"` | 3 failed, 7 passed | 5 failed, 50 passed |
+| `"groq"` | **10 passed** | 1 failed, 54 passed |
+
+The local arm does answer without a key or a daily cap, which is a real advantage and the
+reason the arm exists — but it is served by the *fallback* rather than by the default:
+`_ask()` drops to `answer.ollama_model` on a 429 automatically, so nothing about a spent
+free tier requires the slow model to be the default. What a fallback cannot do is make a
+gate pass, and a default whose workaround is a manual "flip this first" in a comment is
+the failure mode `make gate` exists to catch.
 
 The useful part is that the strict rule found a real behaviour difference between two models
 that both claim to honour a JSON schema. Constrained decoding gets the *shape* right in both;
@@ -523,24 +549,41 @@ curl -s localhost:8000/ask -H 'content-type: application/json' \
     }
   ],
   "repairs": [],
-  "spend": { "calls": 2, "latency_s": 17.762, "cost_usd": 0.0 },
+  "spend": {
+    "calls": 2,
+    "latency_s": 1.424,
+    "wall_s": 1.887,
+    "cost_usd": 0.0,
+    "phases": [
+      { "phase": "answer.generate", "calls": 1, "seconds": 1.3148, "model": "openai/gpt-oss-120b" },
+      { "phase": "retrieve.embed",  "calls": 1, "seconds": 0.1094, "model": "nomic-ai/nomic-embed-text-v1.5-GGUF:F16" },
+      { "phase": "retrieve.query",  "calls": 1, "seconds": 0.0217, "model": null },
+      { "phase": "ask.cites",       "calls": 1, "seconds": 0.0012, "model": null },
+      { "phase": "answer.prompt",   "calls": 1, "seconds": 0.0008, "model": null },
+      { "phase": "answer.ground",   "calls": 1, "seconds": 0.0001, "model": null }
+    ]
+  },
   "provenance": {
-    "arm": "ollama",
-    "answer_model": "bartowski/Llama-3.2-3B-Instruct-GGUF:Q4_K_M",
+    "arm": "groq",
+    "answer_model": "openai/gpt-oss-120b",
     "embed_model": "nomic-ai/nomic-embed-text-v1.5-GGUF:F16",
     "top_k": 5, "retrieved": 5,
     "prompt": "prompts/answer_v1.md",
     "prompt_sha256": "f31f34caf6d695073c99f9b5d77cb483104eb9d6f7e93e16634e0c114cdd86e0",
     "config": "config.toml",
-    "config_sha256": "…"
+    "config_sha256": "c32d4438…"
   }
 }
 ```
 
-That response is real output, and it is the **local arm** because the hosted arm's free tier
-was out of tokens for the day when it was captured (see the 429 note below); the `provenance`
-block is there precisely so a pasted response says which arm produced it. One citation of the
-four is shown and its passage is elided; nothing else is edited.
+That response is real output on the default arm. One citation of the four is shown and its
+passage is elided; the config sha is truncated. Nothing else is edited.
+
+`spend` reports two clocks on purpose. `latency_s` is model time — what the cost meter has
+always counted — and `wall_s` is what the request actually took; `phases` says where the
+difference went. On a *cold* process those diverge badly (the first `retrieve.query` is ~1.4s
+of Chroma start-up against 0.0217s here), which is the whole subject of
+[`make latency`](#where-the-time-went-make-latency).
 
 ### Three outcomes, and none of them is a 5xx
 
@@ -670,6 +713,109 @@ worse than a wordmark that is obviously type.
 
 A checkout without `web/` is not broken — `GET /` falls back to redirecting to `/docs`, the way
 it did before there was a UI, and `tests/test_api.py` pins both branches.
+
+## Where the time went: `make latency`
+
+VRAG-006 gave every run a cost line. It could not say *which part* of a run was slow, and the
+gap was bigger than it looked: the meter instrumented model calls only, so a request that took
+3.586s reported itself as 1.436s and blamed the model. The missing 60% was Chroma client
+construction and imports — code no span covered.
+
+Now every model call **and** every instrumented stage appends a span to
+`runs/telemetry/<session>.jsonl` as it happens, and one command ranks them:
+
+```bash
+make ask Q="How old was Bernini when he first met the Pope?"
+make latency
+```
+
+```
+session 20260827-111843-21820   runs/telemetry/20260827-111843-21820.jsonl
+  started  2026-08-27 11:18:43
+  command  ask.py How old was Bernini when he first met the Pope? --config config.toml
+  wall     2.732s accounted for, 2.594s in spans
+
+  phase              n      total   share      mean       max  model
+  ---------------  ---  ---------  ------  --------  --------  ----------------------------
+  retrieve.query     1     1.398s   51.2%    1.398s    1.398s  -
+  answer.generate    1     1.080s   39.5%    1.080s    1.080s  gpt-oss-120b
+  retrieve.embed     1     0.105s    3.9%    0.105s    0.105s  nomic-embed-text-v1.5-GGUF:F16
+  ask.cites          1     0.008s    0.3%    0.008s    0.008s  -
+  ask.render         1     0.002s    0.1%    0.002s    0.002s  -
+  answer.prompt      1     0.001s    0.0%    0.001s    0.001s  -
+  answer.ground      1     0.000s    0.0%    0.000s    0.000s  -
+  unattributed             0.138s    5.1%                      (wall time inside no span)
+
+  slowest phase: retrieve.query — 1.398s over 1 call(s), 51.2% of accounted wall time
+```
+
+`retrieve.query` — opening the Chroma `PersistentClient` — is **51% of a `make ask`**, more
+than the model call. That is a cold-start cost and the same command proves it: the identical
+pipeline behind a server that answered five questions reads completely differently.
+
+```bash
+make api & ; curl -s -X POST localhost:8000/ask -d '{"question": "..."}'   # ×5, then Ctrl+C
+make latency
+```
+
+```
+  requests 5 (POST /ask)
+  wall     6.542s accounted for, 6.070s in spans
+
+  phase              n      total   share      mean       max  model
+  ---------------  ---  ---------  ------  --------  --------  ----------------------------
+  answer.generate    5     5.494s   84.0%    1.099s    1.279s  gpt-oss-120b
+  retrieve.embed     5     0.471s    7.2%    0.094s    0.106s  nomic-embed-text-v1.5-GGUF:F16
+  retrieve.query     5     0.097s    1.5%    0.019s    0.021s  -
+  unattributed             0.472s    7.2%                      (wall time inside no span)
+```
+
+Warm, `retrieve.query` is 0.019s a call — 1.5%, not 51% — and generation is 84%. Both tables
+are true; the difference is that `make ask` pays the warm-up on every invocation and a server
+pays it once. Neither number was visible before.
+
+| Command | Shows |
+|---|---|
+| `make latency` | the most recent session that recorded a span |
+| `make latency LATENCY_FLAGS=--list` | one line per session, newest first, with its slowest phase |
+| `make latency SESSION=20260827-111949-38708` | one named session |
+| `POST /ask` → `spend.phases` | the same ranking for that one request, no log file needed |
+
+### Read `unattributed` first
+
+It is request wall time minus the spans inside it — the honest version of "and the rest went
+somewhere nothing measures". A large value is not a rounding error, it is a to-do: it is what
+found the Chroma cost in the first place. `answer.validate` is deliberately *not* a span
+(`Answer.model_validate_json` measures 0.000s and wrapping it would mean re-indenting a
+try/except whose branches are early returns), so it lives in this row, which is where things
+nothing measures belong.
+
+Percentages are of wall time, not of the span total. Against the span total they would sum to
+100% and the remainder would be invisible — which is the failure this whole section exists to
+undo.
+
+### What the recorder may not do
+
+It sits on the hot path of every model call, so two rules constrain it, and both are pinned by
+tests in `tests/test_latency.py` because both were broken by the first version:
+
+- **It may not change a number anything else reports.** `Meter._calls` still means *model
+  calls* — the four gates, `summary_line`'s `$/video-hour` and `make ask`'s "N model call(s)"
+  all read it. Latency-only stages go in `_stages`. Putting them in `_calls` made `make ask`
+  print `7 model call(s), 3.12s` for a run that made two.
+- **It may not break a run.** A write that fails disables the sink for the process and warns
+  once on stderr; the pipeline carries on. Telemetry that can break an answer is strictly
+  worse than no telemetry.
+
+The log is appended to as spans finish rather than flushed at exit, because `make api` is
+ended with Ctrl+C and a killed process runs no `atexit` hook — a buffered log would be empty
+for the one session most worth reading. The tables above were both produced from a server that
+was killed, not shut down.
+
+Not a `config.toml` lever: `config.toml` holds knobs that change what a run costs or how good
+it is, and a debug log changes neither. A `Meter` is also built in a dozen places with no
+`Config` in scope. The escape hatch is `VRAG_TELEMETRY_LOG=0`, which the test suite sets for
+every test that does not explicitly want a log (`tests/conftest.py`).
 
 ## Rules that live in this repo
 

@@ -77,6 +77,7 @@ from schemas.api import (
     Health,
     IndexStatus,
     Problem,
+    PhaseTiming,
     Provenance,
     Spend,
     Video,
@@ -260,6 +261,7 @@ def to_response(
     """
     answered = run.answer is not None
     calls = meter._calls
+    wall_s = meter.elapsed_s
     return AskResponse(
         question=question,
         answer=run.answer.answer if answered else "",
@@ -271,10 +273,32 @@ def to_response(
         spend=Spend(
             calls=len(calls),
             latency_s=round(sum(c.latency_s for c in calls), 3),
+            wall_s=round(wall_s, 3),
             cost_usd=round(sum(c.cost_usd for c in calls), 6),
+            phases=phase_timings(meter),
         ),
         provenance=provenance(run, cfg),
     )
+
+
+def phase_timings(meter: Meter) -> list[PhaseTiming]:
+    """The meter's spans as a ranked breakdown, slowest phase first.
+
+    The same split `make latency` prints from the session log, handed straight back on the
+    response so a frontend can show where its own second went without anyone reading a file.
+    """
+    timings = []
+    for phase, spans in meter.by_phase().items():
+        models = sorted({sp.model for sp in spans if sp.model})
+        timings.append(
+            PhaseTiming(
+                phase=phase,
+                calls=len(spans),
+                seconds=round(sum(sp.latency_s for sp in spans), 4),
+                model=" + ".join(models) or None,
+            )
+        )
+    return sorted(timings, key=lambda t: t.seconds, reverse=True)
 
 
 def provenance(run: AnswerRun, cfg: Config) -> Provenance:
@@ -515,29 +539,34 @@ def create_app(cfg: Config | None = None):
             raise ApiError(422, "the question is blank")
 
         meter = Meter()
-        try:
-            run, cites, _ = ask(question, cfg, meter, write=False)
-        except AskError as exc:
-            # Chiefly the empty index. `src.ask` refuses rather than answering from nothing.
-            raise ApiError(503, str(exc), "make index-dev") from exc
-        except RetrieveError as exc:
-            raise ApiError(
-                503, str(exc), "is ollama running? `ollama serve`, then `make doctor`"
-            ) from exc
-        except AnswerError as exc:
-            # Its message already carries the fix (missing key, unpulled model, bad arm) —
-            # except for the free tier's daily cap, which is not a fix but a wait.
-            if _RATE_LIMITED.search(str(exc)):
+        # Bracketed so the session log holds the handler's wall time, not just the sum
+        # of the spans inside it. The `with` is outside the `try` on purpose: a request
+        # that takes ten seconds to fail with a 503 is exactly the one worth seeing in
+        # `make latency`, and `request` records on the way out either way.
+        with meter.request("POST /ask"):
+            try:
+                run, cites, _ = ask(question, cfg, meter, write=False)
+            except AskError as exc:
+                # Chiefly the empty index. `src.ask` refuses rather than answering from nothing.
+                raise ApiError(503, str(exc), "make index-dev") from exc
+            except RetrieveError as exc:
                 raise ApiError(
-                    429,
-                    str(exc),
-                    'the free tier is out of tokens for today. Wait, or run the local arm: '
-                    'answer.arm = "ollama" in config.toml — no key, no network, no limit.',
-                    retry_after_s=_retry_after_s(str(exc)),
+                    503, str(exc), "is ollama running? `ollama serve`, then `make doctor`"
                 ) from exc
-            raise ApiError(503, str(exc), "make doctor") from exc
-        except ConfigError as exc:
-            raise ApiError(500, str(exc)) from exc
+            except AnswerError as exc:
+                # Its message already carries the fix (missing key, unpulled model, bad arm) —
+                # except for the free tier's daily cap, which is not a fix but a wait.
+                if _RATE_LIMITED.search(str(exc)):
+                    raise ApiError(
+                        429,
+                        str(exc),
+                        'the free tier is out of tokens for today. Wait, or run the local arm: '
+                        'answer.arm = "ollama" in config.toml — no key, no network, no limit.',
+                        retry_after_s=_retry_after_s(str(exc)),
+                    ) from exc
+                raise ApiError(503, str(exc), "make doctor") from exc
+            except ConfigError as exc:
+                raise ApiError(500, str(exc)) from exc
 
         return to_response(question, run, cites, cfg, meter)
 

@@ -1,4 +1,4 @@
-.PHONY: setup doctor corpus corpus-check corpus-pointers heldout-check leakage-check sample sample-real test gate gate-phase1 gate-phase2a demo chunks index index-dev probe answer answer-dev ask api openapi clean
+.PHONY: setup doctor corpus corpus-check corpus-pointers heldout-check leakage-check sample sample-real test gate gate-phase1 gate-phase2a demo chunks index index-dev probe answer answer-dev ask api openapi latency clean
 .DEFAULT_GOAL := help
 
 # The video the demo ingests, and the file the levers are read from. Both overridable:
@@ -22,6 +22,14 @@ ASK_FLAGS ?=
 HOST ?=
 PORT ?=
 API_FLAGS ?=
+
+# Which session `make latency` reports on. Empty means the most recent one that recorded a
+# span, which is what you want right after the run you just did:
+#   make latency
+#   make latency SESSION=20260827-111949-38708
+#   make latency LATENCY_FLAGS=--list
+SESSION ?=
+LATENCY_FLAGS ?=
 
 help:
 	@echo "make setup   create the venv and install deps (uv)"
@@ -47,6 +55,7 @@ help:
 	@echo "make ask     Q=\"...\"  THE DEMO: answer + a static player that jumps to the citation"
 	@echo "make api     the same answer over HTTP, for a frontend to call; /docs for the schema"
 	@echo "make openapi print the OpenAPI document and exit; no server, no network"
+	@echo "make latency which phase ate the wall clock last session; LATENCY_FLAGS=--list for older"
 
 setup:
 	@command -v uv >/dev/null || { echo "uv not installed: curl -LsSf https://astral.sh/uv/install.sh | sh"; exit 1; }
@@ -201,6 +210,20 @@ api:
 
 # The API contract as a file, for generating a frontend client or diffing what changed. No
 # server is started and nothing is called, so this works with no index and no key.
+# Which part of the pipeline consumed the time, for the last run that recorded any.
+#
+# Every model call and every instrumented stage appends a span to
+# runs/telemetry/<session>.jsonl as it happens, so this works after the process is gone —
+# which is the only time anyone asks. `make api` is ended with Ctrl+C and a killed process
+# runs no atexit hook, so the log is written as it goes rather than flushed at the end.
+#
+# Offline: no index, no key, no network. It is a reader over JSONL and will report on a log
+# copied off another machine. The row to read first is `unattributed` — wall time inside no
+# span. That row is how 1.35s of Chroma client construction was found, back when a 3.59s
+# request reported itself as 1.44s because only model calls were instrumented.
+latency:
+	uv run python -m src.latency $(SESSION) $(LATENCY_FLAGS)
+
 # @, not echoed: this is meant to be piped (`make openapi > openapi.json`), and make's own
 # echo of the command line would be the first thing in the file and not valid JSON.
 openapi:

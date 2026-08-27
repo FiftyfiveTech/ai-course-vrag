@@ -391,7 +391,7 @@ def _groq_one(
     try:
         with wav.open("rb") as fh:
             audio_s = _wav_duration_s(wav)
-            with meter.span(model, audio_s=audio_s):
+            with meter.span(model, audio_s=audio_s, phase="transcript.asr"):
                 kwargs: dict = {
                     "file": (wav.name, fh, "audio/wav"),
                     "model": groq_model,
@@ -459,7 +459,7 @@ def _ollama_arm(
     audio_s = _wav_duration_s(wav)
 
     try:
-        with meter.span(model, audio_s=audio_s):
+        with meter.span(model, audio_s=audio_s, phase="transcript.asr"):
             kwargs: dict = {"model": tag, "file": str(wav)}
             if language:
                 kwargs["language"] = language

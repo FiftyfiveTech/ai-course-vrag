@@ -112,7 +112,8 @@ def answer(question: str, cfg: Config, meter: Meter) -> AnswerRun:
     raise `AnswerError`.
     """
     hits = retrieve(question, cfg, meter)
-    system, user = build_messages(question, hits, cfg)
+    with meter.stage("answer.prompt"):
+        system, user = build_messages(question, hits, cfg)
 
     raw, tokens, used = _ask(system, user, cfg, meter)
 
@@ -140,7 +141,8 @@ def answer(question: str, cfg: Config, meter: Meter) -> AnswerRun:
             model=used,
         )
 
-    grounded, repairs = ground(parsed, hits)
+    with meter.stage("answer.ground"):
+        grounded, repairs = ground(parsed, hits)
     return AnswerRun(
         question=question,
         hits=hits,
@@ -406,7 +408,7 @@ def _groq_arm(
     text = (response.choices[0].message.content or "").strip()
     usage = getattr(response, "usage", None)
     tokens = int(getattr(usage, "total_tokens", 0) or 0)
-    meter.log(model, time.perf_counter() - t0, tokens=tokens)
+    meter.log(model, time.perf_counter() - t0, tokens=tokens, phase="answer.generate")
     return text, tokens
 
 
@@ -447,7 +449,7 @@ def _ollama_arm(
     tokens = int(response.get("prompt_eval_count") or 0) + int(
         response.get("eval_count") or 0
     )
-    meter.log(model, time.perf_counter() - t0, tokens=tokens)
+    meter.log(model, time.perf_counter() - t0, tokens=tokens, phase="answer.generate")
     return text, tokens
 
 

@@ -112,7 +112,9 @@ def _embed_batch(texts: list[str], model: str, meter: Meter) -> list[list[float]
     ollama_model = _hf_to_ollama_tag(model)
 
     try:
-        with meter.span(model, tokens=sum(len(t.split()) for t in texts)):
+        with meter.span(
+            model, tokens=sum(len(t.split()) for t in texts), phase="index.embed"
+        ):
             response = ollama.embed(model=ollama_model, input=texts)
     except Exception as exc:
         raise EmbedError(

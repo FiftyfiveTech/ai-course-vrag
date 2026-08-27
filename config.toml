@@ -218,24 +218,39 @@ overlap_s = 8.0
 #   arm = "groq"     hosted, free tier, strict JSON schema at generation time
 #   arm = "ollama"   local, no key, no network, no rate limit
 #
-# ollama is the default here: no key, no rate limit, and it keeps working after Groq's free
-# tier spends its daily cap — which it did, mid-week, with the API returning 429 on the first
-# live call through it. _ask() also falls back to this arm automatically on a 429
-# (src/answer.py), so a hosted run lands here anyway; making it the default only removes the
-# round trip.
+# groq is the default, and #25 argued for ollama — so this comment owes both sides.
 #
-# The cost of that default is a gate, and it is not hypothetical. tests/gates/gate_phase2a.py
-# pins SCHEMA_VALID_THRESHOLD = 1.00 and reads ROOT/config.toml directly — there is no arm
-# override on the command line — while the measured table in the README puts the local model
-# at 12/15 schema-valid and 1/3 abstentions on the planted unanswerable pairs. So:
+# The case for groq is measured. Same question, same index, same code, only this lever
+# changed, via `make latency`:
 #
-#   make gate-phase2a     →  flip this to "groq" first. The VRAG-019 number was measured
-#                            there, and 12/15 does not clear a 1.00 threshold.
-#   make demo / make api  →  "ollama" is the right default: no key, no cap, and it answers.
+#   arm = "groq"     answer.generate  1.166s   41.0% of a  2.8s run
+#   arm = "ollama"   answer.generate 24.657s   92.5% of a 26.6s run
 #
-# That is the same rule as everywhere else in this file — a different model's number has to
-# be re-measured and not assumed, which is why the README table exists at all.
-arm = "ollama"
+# 21× on the phase that dominates a run, and nothing else in the pipeline adds up to two
+# seconds. A 26-second answer is not a demo anyone sits through.
+#
+# And it is the arm the gate can pass. tests/gates/gate_phase2a.py pins
+# SCHEMA_VALID_THRESHOLD = 1.00 and reads ROOT/config.toml directly — there is no arm
+# override on the command line — while the README table puts the local model at 12/15
+# schema-valid and 1/3 abstentions. Measured both ways:
+#
+#   arm = "ollama"   gate_phase2a  3 failed,  7 passed   ·  make gate  5 failed, 50 passed
+#   arm = "groq"     gate_phase2a         10 passed      ·  make gate  1 failed, 54 passed
+#
+# The case for ollama was availability: no key, no rate limit, and it keeps working after
+# Groq's free tier spends its daily cap — which it did, mid-week, with the API returning 429
+# on the first live call through it. That is a real failure and it happened. It is answered
+# by the fallback rather than by the default: src.answer._ask already drops to
+# answer.ollama_model on a 429, so groq-as-default is not "breaks when capped", it is fast
+# path first and local safety net behind. What the fallback cannot do is make a gate pass,
+# and a default whose workaround is a manual "flip this first" written in a comment is the
+# failure mode `make gate` exists to catch.
+#
+# For a deliberately offline run — no key, no network, no cap — set "ollama" and expect the
+# numbers above. src.answer.effective_model() and AnswerRun.model (#25) mean every
+# report then names the model that actually answered, so a local run cannot be mistaken for
+# a hosted one.
+arm = "groq"
 
 # Model, by HF repo id. openai/gpt-oss-120b is the one model in this pipeline whose HF repo
 # id and Groq wire id are the same string; that is checked in src.answer._groq_wire_name and
