@@ -1,4 +1,4 @@
-.PHONY: setup doctor corpus corpus-check corpus-pointers heldout-check leakage-check sample sample-real test gate gate-phase1 gate-phase2a demo chunks index index-dev probe answer answer-dev ask api openapi latency clean
+.PHONY: setup doctor corpus corpus-check corpus-pointers heldout-check leakage-check sample sample-real sample-broken test gate gate-phase1 gate-phase2a demo chunks index index-dev probe answer answer-dev ask api openapi latency clean
 .DEFAULT_GOAL := help
 
 # The video the demo ingests, and the file the levers are read from. Both overridable:
@@ -41,7 +41,8 @@ help:
 	@echo "make leakage-check  assert evals/dev and evals/heldout share no labels"
 	@echo "make sample  generate samples/one.mp4 locally (offline; no video is committed)"
 	@echo "make sample-real VIDEO_ID=<id>  fetch one dev corpus video from its recorded url"
-	@echo "make test    unit tests"
+	@echo "make sample-broken  write the five deliberately broken ingest fixtures (VRAG-009)"
+	@echo "make test    unit tests (tests/unit)"
 	@echo "make gate    run every phase gate in tests/gates/"
 	@echo "make demo    ingest VIDEO -> wav + sampled frames + media.json"
 	@echo "make chunks  dump the chunk table for VIDEO; non-zero if a chunk lost its time range"
@@ -87,8 +88,11 @@ heldout-check:
 leakage-check:
 	uv run python -m src.leakage
 
+# tests/unit is the whole unit suite and tests/gates is the phase gates; the split is the
+# directory layout now rather than an --ignore flag, because VRAG-009's acceptance criterion
+# is the command `pytest tests/unit` and a gate command has to be one that resolves.
 test:
-	uv run pytest tests -q --ignore=tests/gates
+	uv run pytest tests/unit -q
 
 # Leakage first, and it prints its number before anything else runs: tests/gates/README.md
 # says no gate result counts until dev and held-out are known to be disjoint, so a leak has
@@ -112,6 +116,15 @@ sample: samples/one.mp4
 sample-real:
 	@test -n "$(VIDEO_ID)" || { echo "usage: make sample-real VIDEO_ID=<video_id from data/corpus/manifest.json, dev split>"; exit 1; }
 	uv run python -m src.sample --real $(VIDEO_ID) --config $(CONFIG)
+
+# The five failure fixtures VRAG-009 tests against: no audio track, no duration, 0 bytes,
+# cut off before the moov atom, and noise named .mp4. Each line says what is wrong with the
+# file it wrote. Offline; three of the five need no ffmpeg at all.
+#
+# The tests build their own copies in tmp_path, so this target is for looking at a failure by
+# hand: `uv run python -m src.ingest samples/broken/truncated.mp4` should exit 1 and say why.
+sample-broken:
+	uv run python -m src.sample --broken all --config $(CONFIG)
 
 # VIDEO is a prerequisite so the gate command works from a clean clone: samples/one.mp4 has
 # a rule and gets built; any other path has to already exist.

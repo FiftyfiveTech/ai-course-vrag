@@ -20,7 +20,7 @@ other person as a collaborator with push access.
 |---|---|
 | `src/` | The system. Small modules, one job each. |
 | `config.toml` | Every cost or quality lever — frame sampling rate, audio target, sample spec. Read only by `src/config.py`, which refuses to default a missing lever. |
-| `samples/` | Sample videos, **generated or fetched, never committed**. `make sample` writes a synthetic clip; `make sample-real VIDEO_ID=…` pulls one dev video from its manifest url. |
+| `samples/` | Sample videos, **generated or fetched, never committed**. `make sample` writes a synthetic clip; `make sample-real VIDEO_ID=…` pulls one dev video from its manifest url; `make sample-broken` writes the five failure fixtures. |
 | `runs/` | Ingest output, one directory per video: `audio.wav`, `frames/`, `media.json`; and `runs/ask/`, the demo pages `make ask` writes. Gitignored. |
 | `data/corpus/` | The 10-video pilot corpus: **pointers only**, never media. `manifest.json` + `PROVENANCE.md` (licence, provenance, how the split was chosen). |
 | `prompts/` | Versioned prompt files. `answer_v1.md` is the Phase 2 answering prompt; its `## System` / `## User` sections are the messages, the rest is commentary. Never inline a prompt in code. |
@@ -29,6 +29,7 @@ other person as a collaborator with push access.
 | `evals/dev/` | **Builder** tunes here. 15 cases (`dev_v1.jsonl`): 12 answerable, 3 not. Written from the transcripts, not from watching — see [evals/dev/README.md](evals/dev/README.md) before quoting a number from them. |
 | `evals/heldout/` | **Evaluator** only. Sealed Wednesday, tagged `heldout-v1`. The Builder never reads it. |
 | `evals/QA_SPEC.md` | What a correct citation is (±30 s), what counts as unanswerable, how the gate scores. |
+| `tests/unit/` | The unit suite — `make test`. Split from `tests/gates/` by directory so `pytest tests/unit` is a command that resolves. |
 | `tests/gates/` | One script per phase gate. It prints the number; the number decides. |
 | `runs/telemetry/` | One JSONL per process: a span per model call and per instrumented stage. Read with `make latency`. Gitignored. |
 | `STANDUP.md` | Daily log. Two minutes, append-only. |
@@ -75,6 +76,57 @@ Without that both would number from `q001` and the id check would fire on work t
 
 `evals/dev/` is still empty, so today the check passes **vacuously** and says so in its output. It
 starts meaning something with the first dev case.
+
+## Failure paths: what happens when the video is not a video
+
+`src/ingest.py` has raised on the three ways a video arrives unusable since VRAG-005. What it
+had no way to prove is that it raises on a *real* file — the tests drove hand-written ffprobe
+dicts. VRAG-009 built the files.
+
+```bash
+make sample-broken                                    # five fixtures, offline, ~10 s
+uv run python -m src.ingest samples/broken/empty.mp4   # exit 1, and it says why
+```
+
+| Fixture | What is wrong | Caught by | The message |
+|---|---|---|---|
+| `no_audio.mp4` | video stream, no audio stream | `extract_audio` | `no audio stream. Nothing to transcribe…` |
+| `zero_duration.mp4` | container parses, 0 streams, no duration | `media_metadata` | `ffprobe reports no positive duration (None)…` |
+| `empty.mp4` | 0 bytes | `ingest` pre-flight | `0 bytes. The file is empty…` |
+| `truncated.mp4` | `ftyp` box, no `moov` — cut off mid-write | `probe` | `probe: ffprobe exited 1 on … moov atom not found` |
+| `garbage.mp4` | 64 kB of noise named `.mp4` | `probe` | same as above — the extension picks the demuxer |
+
+Four things are asserted per fixture in `tests/unit/test_ingest_failures.py`, because "fails
+loudly with a useful message" is all four: it raises `IngestError` rather than a
+`CalledProcessError` three frames deep; the message carries the phrase that tells this failure
+from the other four; the message **names the file**, which is the only thing that matters when
+nine of ten videos were fine; and **no partial output survives** — no `media.json`, no wav, no
+frames. A run that half-succeeded is the one whose failure gets found in Phase 2.
+
+Two of those came out of building the fixtures rather than from reading the code:
+
+**A corrupt input named no file.** `probe: ffprobe exited 1 — moov atom not found`, with no
+path in it. The path *appeared* in the output only because ffprobe prefixes its own stderr
+with the filename — luck on one code path and absent on the others. `_run()` now takes the
+file as an argument and puts it in the message itself.
+
+**A 0-byte file reported itself as a corrupt container.** ffprobe answers `moov atom not
+found / Invalid data found when processing input` for an empty file, which sends the reader
+looking for a broken encode instead of a job that wrote nothing. `ingest()` checks the size
+itself now, before ffprobe runs — which is also why `empty` is the one failure path that
+tests on a machine with no ffmpeg at all.
+
+And one that a fake probe dict had quietly had backwards: **ffprobe succeeds on
+`zero_duration.mp4`.** Exit 0, `probe_score` 100, a parseable mov container — with
+`nb_streams: 0` and no `duration` key. So the rejection is `media_metadata`'s and not
+`probe`'s, and the fixture proves what the other four cannot: a file can pass ffprobe clean
+and still have nothing in it to ingest.
+
+Three of the five fixtures are written byte by byte and need no ffmpeg — deliberately, so the
+failure paths stay tested on a machine where `make demo` itself cannot run. The other two skip
+without it, and `pytest tests/unit -rs` prints the count. **A skip is not a pass**: on a
+machine with ffmpeg installed but off `PATH`, this suite goes green having tested almost none
+of this.
 
 ## Chunking
 
@@ -712,7 +764,7 @@ image, because there is no logo asset in this repo and committing an invented on
 worse than a wordmark that is obviously type.
 
 A checkout without `web/` is not broken — `GET /` falls back to redirecting to `/docs`, the way
-it did before there was a UI, and `tests/test_api.py` pins both branches.
+it did before there was a UI, and `tests/unit/test_api.py` pins both branches.
 
 ## Where the time went: `make latency`
 
@@ -797,7 +849,7 @@ undo.
 ### What the recorder may not do
 
 It sits on the hot path of every model call, so two rules constrain it, and both are pinned by
-tests in `tests/test_latency.py` because both were broken by the first version:
+tests in `tests/unit/test_latency.py` because both were broken by the first version:
 
 - **It may not change a number anything else reports.** `Meter._calls` still means *model
   calls* — the four gates, `summary_line`'s `$/video-hour` and `make ask`'s "N model call(s)"
