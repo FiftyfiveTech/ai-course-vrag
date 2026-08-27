@@ -369,8 +369,16 @@ as abstentions. That is a **deliberate choice and a reversible one**: moving the
 `abstain ⇒ no citations` rule out of the schema and into `ground()`, which already normalises
 answers into abstentions, would score the local arm 15/15 with 3/3 abstentions and 2 repairs.
 It is not done here for one reason — it would make the VRAG-019 criterion (*schema-valid on
-100% of dev*) easier to pass, and the gate is measured on the configured arm, where the strict
-rule already scores 15/15. Flagged for review rather than decided quietly.
+100% of dev*) easier to pass, and 15/15 under a rule relaxed to reach it is not the same
+number. Flagged for review rather than decided quietly.
+
+This now has a direct consequence, because `answer.arm` defaults to `"ollama"`.
+`tests/gates/gate_phase2a.py` pins `SCHEMA_VALID_THRESHOLD = 1.00` and reads `config.toml`
+directly — there is no arm override on the command line — so **`make gate-phase2a` must be
+run with `answer.arm = "groq"`**, which is where the VRAG-019 number was measured. The table
+above is why: 12/15 does not clear a 1.00 threshold. The local default is right for
+`make demo` and `make api`, which need an arm that answers without a key or a daily cap, and
+wrong for the gate, which needs the arm the criterion was measured on.
 
 The useful part is that the strict rule found a real behaviour difference between two models
 that both claim to honour a JSON schema. Constrained decoding gets the *shape* right in both;
