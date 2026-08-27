@@ -27,6 +27,7 @@ other person as a collaborator with push access.
 | `prompts/` | Versioned prompt files. `answer_v1.md` is the Phase 2 answering prompt; its `## System` / `## User` sections are the messages, the rest is commentary. Never inline a prompt in code. |
 | `schemas/` | Pydantic models. `answer.py` is the `{answer, citations[], abstain}` contract — one declaration, used both to constrain generation and to validate the reply. `api.py` is the HTTP contract `make api` serves and `/docs` renders. |
 | `web/` | The frontend `make api` serves at `/` — three static files, no build step. Same origin as the API, so a citation's root-relative `stream_url` resolves and no CORS entry is needed. |
+| `docs/learning/` | The concept primer and the coach page (VRAG-018), plus the sweep JSON behind both. `make sweep` re-measures, `make coach` re-renders. |
 | `evals/dev/` | **Builder** tunes here. 15 cases (`dev_v1.jsonl`): 12 answerable, 3 not. Written from the transcripts, not from watching — see [evals/dev/README.md](evals/dev/README.md) before quoting a number from them. |
 | `evals/heldout/` | **Evaluator** only. Sealed Wednesday, tagged `heldout-v1`. The Builder never reads it. |
 | `evals/QA_SPEC.md` | What a correct citation is (±30 s), what counts as unanswerable, how the gate scores. |
@@ -153,7 +154,18 @@ make chunks VIDEO=samples/181_8np5YKYx3sU.mp4    # dumps the table; exits non-ze
 `|citation.t_start − t_ref| ≤ 30`, so a chunk wider than 30 s can retrieve the right passage
 and still be marked wrong. 30 s is *not* the ceiling that implies: a chunk overhangs its window
 at both ends, so it runs to `window_s + 2 × (longest segment)`. On dev video 181 `window_s = 30`
-produced a 35.7 s chunk — 2 of 5 past the tolerance. 25.0 is the widest setting where none are.
+produced a 35.7 s chunk — 2 of 5 past the tolerance.
+
+> **Correction (VRAG-018).** This section used to end "25.0 is the widest setting where none
+> are." That was measured on video 181 alone and it does not hold for the dev corpus. 181's
+> longest whisper segment is 4.16 s; video **611**'s is **29.98 s**, which puts the bound at
+> `25 + 2 × 29.98 = 85 s`. Measured across all four dev videos at the shipped setting:
+> **120 of 346 chunks are longer than 30 s, and the longest is 53.8 s** — the same 53.8 s chunk
+> at every window width from 12 s up, because its length is set by its segments and not by the
+> grid. The formula above was right; the input was one video. It cost no recall on `evals/dev`
+> (a long chunk is only uncitable for references in its last 23.8 s), so `25.0` stands — but
+> for a reason that has not been demonstrated, which is worth knowing before the ASR arm moves.
+> Full working: [docs/learning/primer-chunking-embeddings.md §4](docs/learning/primer-chunking-embeddings.md).
 
 ## Indexing
 
@@ -246,6 +258,44 @@ vocabulary with the chunk it is meant to find and 0.9167 is optimistic by constr
 says the retrieval path is wired correctly and that F16 weights fixed a real defect. It is not
 evidence that retrieval works on questions a user would actually ask. `d001` also hits at
 exactly `dt = 30.0 s`, dead on the tolerance boundary — a rounding change either way flips it.
+
+## The primer and the coach page
+
+VRAG-018. [`docs/learning/primer-chunking-embeddings.md`](docs/learning/primer-chunking-embeddings.md)
+is the prose — what a chunk window trades, what an embedding actually stores, what overlap costs
+— and [`docs/learning/coach.html`](docs/learning/coach.html) is the same numbers with the levers
+movable. Both are built from one 12-point sweep of `chunk.window_s` × `chunk.overlap_s`, scored
+on `evals/dev` by the QA_SPEC §2 rule.
+
+```bash
+make sweep      # 12 points, ~22 min of local embedding, $0.0000
+make coach      # rebuild the page from what the sweep wrote
+make sweep-dry  # the same grid, chunk counts only — seconds, no Ollama
+```
+
+The sweep never writes `config.toml` and never touches `./chroma`: Phase 1 was graded at
+`25.0 / 8.0`, and a sweep that moved the levers in place would re-tune a gate that has already
+been passed. Each point gets its own store under `runs/sweep/`, and the transcripts come from
+the `runs/` cache, so twelve points make **zero** ASR calls.
+
+Three things came out of it that were not visible before:
+
+| Finding | Number |
+|---|---|
+| The window is not a tuning lever on this set | Six of seven windows — 12, 15, 20, 25, 30, 45 s — return the identical **recall@5 = 0.9167**. Only 60 s is worse (0.8333). What the window buys is index size: 1300 chunks / 9.8 MB at 12 s against 114 / 1.9 MB at 60 s |
+| `overlap_s = 0` still duplicates the corpus | **1.22×**, because a segment straddling a boundary is placed in both windows even when the windows do not overlap. Duplication tracks `window ÷ hop` times a ~1.21 overhang factor |
+| The whole recall benefit of overlap is one pair | `d003` at overlap 0, missing by **35.0 s** against a 30 s tolerance — a boundary in the wrong place, which is exactly what overlap is for. `2.0` recovers it; the shipped `8.0` recovers nothing further |
+
+It also falsified the ceiling derivation in [Chunking](#chunking) above — see the correction
+there, and §4 of the primer for the working.
+
+Every figure in the primer is checked against the sweep JSON by
+`tests/unit/test_primer_numbers.py`, which parses the tables back out of the markdown. A primer
+that quotes numbers can drift from them; this is what says which sentence went stale.
+
+```bash
+uv run pytest tests/unit/test_primer_numbers.py -v
+```
 
 ## Answering with citations
 

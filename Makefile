@@ -1,4 +1,4 @@
-.PHONY: sources setup doctor corpus corpus-check corpus-pointers heldout-check leakage-check sample sample-real sample-broken test gate gate-phase1 gate-phase2a demo chunks index index-dev probe answer answer-dev ask api openapi latency clean
+.PHONY: sources setup doctor corpus corpus-check corpus-pointers heldout-check leakage-check sample sample-real sample-broken test gate gate-phase1 gate-phase2a demo chunks index index-dev probe answer answer-dev ask api openapi latency sweep sweep-dry coach clean
 .DEFAULT_GOAL := help
 
 # The video the demo ingests, and the file the levers are read from. Both overridable:
@@ -35,6 +35,9 @@ API_FLAGS ?=
 SESSION ?=
 LATENCY_FLAGS ?=
 
+# Extra flags for `make index` / `make index-dev` — most often --reset.
+INDEX_FLAGS ?=
+
 help:
 	@echo "make setup   create the venv and install deps (uv)"
 	@echo "make doctor  check every dependency and credential; non-zero on FAIL"
@@ -62,6 +65,9 @@ help:
 	@echo "make openapi print the OpenAPI document and exit; no server, no network"
 	@echo "make latency which phase ate the wall clock last session; LATENCY_FLAGS=--list for older"
 	@echo "make sources which videos an @tag can name; scope a question with make ask Q=\"@611 ...\""
+	@echo "make sweep    re-measure the chunking sweep behind the VRAG-018 primer (~22 min, zero spend)"
+	@echo "make sweep-dry  the same grid, chunk counts only - no embedding, seconds"
+	@echo "make coach   open the coach page: the sweep as a chart you can move the levers on"
 
 setup:
 	@command -v uv >/dev/null || { echo "uv not installed: curl -LsSf https://astral.sh/uv/install.sh | sh"; exit 1; }
@@ -154,8 +160,11 @@ index: $(VIDEO)
 # (`make corpus`) cannot leave this pointing at videos that are no longer dev. Fetches any
 # video that is not already in samples/ (pointers, not copies — PROVENANCE) and refuses
 # held-out ids outright.
+# INDEX_FLAGS is how --reset gets through. It matters after a chunk lever moves: chunk ids
+# carry the timestamps, so the old rows survive a re-index as orphans and the store ends up
+# holding two generations that score better than either (VRAG-018 §7, and see `sources`).
 index-dev:
-	uv run python -m src.index --dev --config $(CONFIG)
+	uv run python -m src.index --dev --config $(CONFIG) $(INDEX_FLAGS)
 
 # Unlabelled questions in, hits out, no number. The gate says how often the right moment is
 # in the top 5; it cannot say that the right passage keeps landing at rank 4, or that a
@@ -256,6 +265,34 @@ latency:
 # echo of the command line would be the first thing in the file and not valid JSON.
 openapi:
 	@uv run python -m src.api --config $(CONFIG) --print-openapi
+
+# The measurements behind the VRAG-018 primer: recall@5, chunk shape and index size across a
+# 12-point grid of chunk.window_s x chunk.overlap_s. Writes docs/learning/data/chunking_sweep.json,
+# which docs/learning/coach.html reads and docs/learning/primer-chunking-embeddings.md quotes.
+#
+# Reads config.toml and never writes it, and never touches ./chroma - each grid point gets its
+# own store under runs/sweep/. That is deliberate: Phase 1 was graded at window_s = 25.0 /
+# overlap_s = 8.0, and a sweep that edited the levers in place would re-tune a passed gate.
+#
+# Needs the cached transcripts (`make index-dev` once) and Ollama. No ASR call and no hosted
+# call: ~20 min of local embedding, $0.00.
+sweep:
+	uv run python tools/sweep_chunking.py $(SWEEP_FLAGS)
+
+# The same grid with the embedding and the scoring skipped - chunk counts, durations and the
+# duplication factor only. Seconds, no Ollama, no store written. Use it to see what a lever
+# does to the index before paying 20 minutes to find out what it does to recall.
+sweep-dry:
+	uv run python tools/sweep_chunking.py --dry-run --out runs/sweep/dry.json
+
+# The coach page - VRAG-018. The sweep as two charts and a lever you can move, plus the four
+# checks to run before blaming the chunker. Standalone HTML with the numbers inlined at build
+# time by tools/build_coach.py, so it opens off the filesystem with no server and no fetch.
+coach: docs/learning/coach.html
+	@echo "open docs/learning/coach.html"
+
+docs/learning/coach.html: tools/build_coach.py docs/learning/data/chunking_sweep.json
+	uv run python tools/build_coach.py
 
 clean:
 	rm -rf .venv .pytest_cache **/__pycache__ .devids

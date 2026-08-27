@@ -200,14 +200,29 @@ split_search_s = 5.0
 #   25.0     8.0     6       29.0 s     0
 #   22.0     8.0     7       24.4 s     0
 #
-# 25.0 is the widest setting that keeps every chunk on dev citable. Re-sweep it when the ASR
-# arm changes — the bound depends on how long that arm's segments run.
+# 25.0 is the widest setting that keeps every chunk on *video 181* citable. VRAG-018 swept all
+# four dev videos and that generalisation does not survive: 611's longest whisper segment is
+# 29.98 s, not 181's 4.16 s, so the bound here is 25 + 2 x 29.98 = 85 s and 120 of the 346 dev
+# chunks are longer than the 30 s tolerance — the longest is 53.8 s, and it is the same chunk at
+# every window from 12 s up because its length comes from its segments, not from the grid.
+#
+# It costs no recall on evals/dev (recall@5 = 0.9167 at every window from 12 s to 45 s), so this
+# value stands. What does not stand is the reasoning: re-sweep when the ASR arm changes, because
+# the bound depends on that arm's segment lengths, and a window narrower than 25.0 will not fix
+# a long chunk. docs/learning/primer-chunking-embeddings.md §4 has the working.
 window_s = 25.0
 
 # How much of each window the next one repeats. A sentence straddling a boundary then lands
-# whole in at least one chunk. The cost is duplicated text — measured at 1.74× the transcript
-# on dev video 181 at these settings — so embedding spend scales with this number. That trade
-# is the subject of VRAG-018; this is the lever to sweep.
+# whole in at least one chunk. The cost is duplicated text — 1.79x the transcript across all
+# four dev videos at these settings — so embedding spend scales with this number.
+#
+# VRAG-018 swept it. Two results worth having here. Overlap = 0 is not duplication = 1.0: it
+# measures 1.22x, because segments are never split and a segment straddling a boundary is placed
+# in both windows even when the windows do not overlap. And the whole visible recall benefit of
+# overlap on evals/dev is one pair (d003, which at overlap 0 misses by 35.0 s against a 30 s
+# tolerance); 2.0 already recovers it, and 8.0 recovers nothing further that 2.0 had not.
+# 8.0 is kept because Phase 1 was graded on it, not because the sweep argues for it over 2.0 —
+# on 12 pairs those two settings are tied. docs/learning/primer-chunking-embeddings.md §5.
 overlap_s = 8.0
 
 [answer]
