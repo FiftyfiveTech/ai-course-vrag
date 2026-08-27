@@ -621,16 +621,18 @@ def ask(
             "abstain, which is a working demo of nothing.)"
         )
 
-    cites = build_cites(run, cfg, load_manifest())
+    with meter.stage("ask.cites"):
+        cites = build_cites(run, cfg, load_manifest())
 
     if not write:
         return run, cites, None
 
     out_path = page_path(question, out_dir)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(
-        render_page(question, run, cites, cfg, out_path, meter), encoding="utf-8"
-    )
+    with meter.stage("ask.render"):
+        out_path.write_text(
+            render_page(question, run, cites, cfg, out_path, meter), encoding="utf-8"
+        )
     return run, cites, out_path
 
 

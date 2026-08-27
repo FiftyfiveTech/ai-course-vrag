@@ -75,7 +75,12 @@ def retrieve(question: str, cfg: Config, meter: Meter) -> list[RetrievedChunk]:
     collection_name = cfg.get("embed.collection")
 
     vector = _embed_question(question, model, meter)
-    return _query(vector, k, chroma_path, collection_name)
+    # Staged, not just called: opening the Chroma PersistentClient is ~1.35s on the first
+    # query of a process and ~0.02s after, and until this span existed neither number was
+    # visible anywhere — the meter recorded model calls only, so a 3.59s request reported
+    # itself as 1.44s. See `make latency`.
+    with meter.stage("retrieve.query"):
+        return _query(vector, k, chroma_path, collection_name)
 
 
 def recall_at_k(
@@ -127,7 +132,7 @@ def _embed_question(question: str, model: str, meter: Meter) -> list[float]:
 
     ollama_model = _hf_to_ollama_tag(model)
     try:
-        with meter.span(model, tokens=len(question.split())):
+        with meter.span(model, tokens=len(question.split()), phase="retrieve.embed"):
             response = ollama.embed(model=ollama_model, input=[question])
     except Exception as exc:
         raise RetrieveError(

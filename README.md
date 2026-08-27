@@ -30,6 +30,7 @@ other person as a collaborator with push access.
 | `evals/heldout/` | **Evaluator** only. Sealed Wednesday, tagged `heldout-v1`. The Builder never reads it. |
 | `evals/QA_SPEC.md` | What a correct citation is (±30 s), what counts as unanswerable, how the gate scores. |
 | `tests/gates/` | One script per phase gate. It prints the number; the number decides. |
+| `runs/telemetry/` | One JSONL per process: a span per model call and per instrumented stage. Read with `make latency`. Gitignored. |
 | `STANDUP.md` | Daily log. Two minutes, append-only. |
 
 ## The sealed evaluation set
@@ -662,6 +663,109 @@ worse than a wordmark that is obviously type.
 
 A checkout without `web/` is not broken — `GET /` falls back to redirecting to `/docs`, the way
 it did before there was a UI, and `tests/test_api.py` pins both branches.
+
+## Where the time went: `make latency`
+
+VRAG-006 gave every run a cost line. It could not say *which part* of a run was slow, and the
+gap was bigger than it looked: the meter instrumented model calls only, so a request that took
+3.586s reported itself as 1.436s and blamed the model. The missing 60% was Chroma client
+construction and imports — code no span covered.
+
+Now every model call **and** every instrumented stage appends a span to
+`runs/telemetry/<session>.jsonl` as it happens, and one command ranks them:
+
+```bash
+make ask Q="How old was Bernini when he first met the Pope?"
+make latency
+```
+
+```
+session 20260827-111843-21820   runs/telemetry/20260827-111843-21820.jsonl
+  started  2026-08-27 11:18:43
+  command  ask.py How old was Bernini when he first met the Pope? --config config.toml
+  wall     2.732s accounted for, 2.594s in spans
+
+  phase              n      total   share      mean       max  model
+  ---------------  ---  ---------  ------  --------  --------  ----------------------------
+  retrieve.query     1     1.398s   51.2%    1.398s    1.398s  -
+  answer.generate    1     1.080s   39.5%    1.080s    1.080s  gpt-oss-120b
+  retrieve.embed     1     0.105s    3.9%    0.105s    0.105s  nomic-embed-text-v1.5-GGUF:F16
+  ask.cites          1     0.008s    0.3%    0.008s    0.008s  -
+  ask.render         1     0.002s    0.1%    0.002s    0.002s  -
+  answer.prompt      1     0.001s    0.0%    0.001s    0.001s  -
+  answer.ground      1     0.000s    0.0%    0.000s    0.000s  -
+  unattributed             0.138s    5.1%                      (wall time inside no span)
+
+  slowest phase: retrieve.query — 1.398s over 1 call(s), 51.2% of accounted wall time
+```
+
+`retrieve.query` — opening the Chroma `PersistentClient` — is **51% of a `make ask`**, more
+than the model call. That is a cold-start cost and the same command proves it: the identical
+pipeline behind a server that answered five questions reads completely differently.
+
+```bash
+make api & ; curl -s -X POST localhost:8000/ask -d '{"question": "..."}'   # ×5, then Ctrl+C
+make latency
+```
+
+```
+  requests 5 (POST /ask)
+  wall     6.542s accounted for, 6.070s in spans
+
+  phase              n      total   share      mean       max  model
+  ---------------  ---  ---------  ------  --------  --------  ----------------------------
+  answer.generate    5     5.494s   84.0%    1.099s    1.279s  gpt-oss-120b
+  retrieve.embed     5     0.471s    7.2%    0.094s    0.106s  nomic-embed-text-v1.5-GGUF:F16
+  retrieve.query     5     0.097s    1.5%    0.019s    0.021s  -
+  unattributed             0.472s    7.2%                      (wall time inside no span)
+```
+
+Warm, `retrieve.query` is 0.019s a call — 1.5%, not 51% — and generation is 84%. Both tables
+are true; the difference is that `make ask` pays the warm-up on every invocation and a server
+pays it once. Neither number was visible before.
+
+| Command | Shows |
+|---|---|
+| `make latency` | the most recent session that recorded a span |
+| `make latency LATENCY_FLAGS=--list` | one line per session, newest first, with its slowest phase |
+| `make latency SESSION=20260827-111949-38708` | one named session |
+| `POST /ask` → `spend.phases` | the same ranking for that one request, no log file needed |
+
+### Read `unattributed` first
+
+It is request wall time minus the spans inside it — the honest version of "and the rest went
+somewhere nothing measures". A large value is not a rounding error, it is a to-do: it is what
+found the Chroma cost in the first place. `answer.validate` is deliberately *not* a span
+(`Answer.model_validate_json` measures 0.000s and wrapping it would mean re-indenting a
+try/except whose branches are early returns), so it lives in this row, which is where things
+nothing measures belong.
+
+Percentages are of wall time, not of the span total. Against the span total they would sum to
+100% and the remainder would be invisible — which is the failure this whole section exists to
+undo.
+
+### What the recorder may not do
+
+It sits on the hot path of every model call, so two rules constrain it, and both are pinned by
+tests in `tests/test_latency.py` because both were broken by the first version:
+
+- **It may not change a number anything else reports.** `Meter._calls` still means *model
+  calls* — the four gates, `summary_line`'s `$/video-hour` and `make ask`'s "N model call(s)"
+  all read it. Latency-only stages go in `_stages`. Putting them in `_calls` made `make ask`
+  print `7 model call(s), 3.12s` for a run that made two.
+- **It may not break a run.** A write that fails disables the sink for the process and warns
+  once on stderr; the pipeline carries on. Telemetry that can break an answer is strictly
+  worse than no telemetry.
+
+The log is appended to as spans finish rather than flushed at exit, because `make api` is
+ended with Ctrl+C and a killed process runs no `atexit` hook — a buffered log would be empty
+for the one session most worth reading. The tables above were both produced from a server that
+was killed, not shut down.
+
+Not a `config.toml` lever: `config.toml` holds knobs that change what a run costs or how good
+it is, and a debug log changes neither. A `Meter` is also built in a dozen places with no
+`Config` in scope. The escape hatch is `VRAG_TELEMETRY_LOG=0`, which the test suite sets for
+every test that does not explicitly want a log (`tests/conftest.py`).
 
 ## Rules that live in this repo
 

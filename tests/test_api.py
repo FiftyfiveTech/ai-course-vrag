@@ -628,11 +628,47 @@ def test_the_api_and_the_demo_page_name_the_same_prompt(tmp_path, monkeypatch):
 def test_the_spend_is_this_request_and_not_the_process(tmp_path, monkeypatch):
     # One Meter per request. A process-wide meter would make the second question look like
     # it cost the first one too, and the $/question line on a frontend would only ever rise.
+    # Asserted field by field rather than against a whole dict: this test used to pin the
+    # exact shape of `spend` and broke the day `wall_s` was added, which told nobody anything.
     stub_ask(monkeypatch, run=a_run(answered()), cites=[a_cite()])
     c = client(write_config(tmp_path))
     first = c.post("/ask", json={"question": "q"}).json()["spend"]
     second = c.post("/ask", json={"question": "q2"}).json()["spend"]
-    assert first == second == {"calls": 0, "latency_s": 0.0, "cost_usd": 0.0}
+    assert first["calls"] == second["calls"] == 0
+    assert first["cost_usd"] == second["cost_usd"] == 0.0
+    assert first["latency_s"] == second["latency_s"]
+
+
+def test_the_response_separates_model_time_from_request_time(tmp_path, monkeypatch):
+    # `latency_s` is the sum of model-call latency and is NOT the request duration — on a
+    # cold request it understated the wall clock by 60%, because Chroma client construction
+    # is not a model call. Both numbers are reported so a client can show the honest one.
+    stub_ask(monkeypatch, run=a_run(answered()), cites=[a_cite()])
+    spend = client(write_config(tmp_path)).post("/ask", json={"question": "q"}).json()["spend"]
+    assert set(spend) == {"calls", "latency_s", "wall_s", "cost_usd", "phases"}
+    assert spend["wall_s"] >= 0.0
+
+
+def test_the_response_ranks_its_phases_slowest_first(tmp_path, monkeypatch):
+    """The per-request half of `make latency`, so a frontend needs no log file."""
+    from src.telemetry import Meter
+
+    def fake(question, cfg, meter, *, out_dir=None, write=True):
+        meter.log("openai/gpt-oss-120b", 1.5, tokens=10, phase="answer.generate")
+        with meter.stage("retrieve.query"):
+            pass
+        meter.log("nomic-ai/nomic-embed-text-v1.5-GGUF:F16", 0.1, tokens=5,
+                  phase="retrieve.embed")
+        return a_run(answered()), [a_cite()], None
+
+    monkeypatch.setattr("src.api.ask", fake)
+    phases = client(write_config(tmp_path)).post("/ask", json={"question": "q"}).json()[
+        "spend"
+    ]["phases"]
+    assert [p["phase"] for p in phases][:2] == ["answer.generate", "retrieve.embed"]
+    assert phases[0]["model"] == "openai/gpt-oss-120b"
+    # A stage makes no model call, so it reports no model rather than an empty string.
+    assert next(p for p in phases if p["phase"] == "retrieve.query")["model"] is None
 
 
 # ---------------------------------------------------------------------------

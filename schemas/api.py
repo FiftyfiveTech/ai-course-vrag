@@ -81,12 +81,40 @@ class CitationOut(BaseModel):
     )
 
 
-class Spend(BaseModel):
-    """What this one request cost. Every model call goes through the shared meter."""
+class PhaseTiming(BaseModel):
+    """How long one phase of the pipeline took on this request.
 
-    calls: int
-    latency_s: float
+    The names are the span labels in `src/telemetry.py` — `retrieve.embed`,
+    `retrieve.query`, `answer.prompt`, `answer.generate`, `answer.ground`, `ask.cites`.
+    Treat them as a diagnostic, not as a contract: a phase can be added or renamed when the
+    pipeline changes, and a client should render whatever comes back rather than switch on it.
+    """
+
+    phase: str
+    calls: int = Field(description="spans under this label; >1 when a fallback fired")
+    seconds: float
+    model: str | None = Field(
+        default=None, description="null for a stage that makes no model call"
+    )
+
+
+class Spend(BaseModel):
+    """What this one request cost and where its time went.
+
+    `latency_s` is the sum of *model-call* latency and nothing else — it is what the cost
+    meter has always reported, and on its own it is not the request duration. That
+    distinction is not pedantry: on the first request of a process it understated the wall
+    clock by 60%, because Chroma client construction and imports are not model calls. Show
+    `wall_s` to a user; use `latency_s` to reason about the models.
+    """
+
+    calls: int = Field(description="model calls, not spans")
+    latency_s: float = Field(description="sum of model-call latency; NOT the request duration")
+    wall_s: float = Field(description="what the request actually took, end to end")
     cost_usd: float
+    phases: list[PhaseTiming] = Field(
+        default_factory=list, description="slowest first; `make latency` reports the same split"
+    )
 
 
 class Provenance(BaseModel):
