@@ -24,6 +24,7 @@ from src.transcript import (
     _parse_groq_segments,
     _parse_ollama_segments,
     _wav_duration_s,
+    bound_to_audio,
     drop_impossible,
     offset_segments,
     split_points,
@@ -494,6 +495,55 @@ def test_groq_arm_does_not_split_a_file_that_fits(tmp_path, meter, groq_key):
     assert segments == [Segment(t_start=0.0, t_end=1.0, text="hi")]
 
 
+# --- bound_to_audio ------------------------------------------------------------------
+#
+# Whisper pads its last analysis window to a full 30 s and captions the padding, so the
+# final segment of a recording routinely ends after the recording does. That is not a
+# cosmetic wrong number: a chunk inherits its range from the segments inside it, so one
+# such segment made a chunk claiming to end 23 s after the video, chunk.verify() refused
+# it, and a 90.9 min video could not be indexed at all.
+
+
+def test_bound_to_audio_clamps_a_segment_that_outruns_the_recording():
+    """The real one: 29.98 s of 'Thank you.' on a 5454.656 s meeting, one whisper window."""
+    segs = [
+        Segment(t_start=5443.876, t_end=5444.236, text="Bye."),
+        Segment(t_start=5448.136, t_end=5478.116, text="Thank you."),
+    ]
+    out = bound_to_audio(segs, 5454.658)
+    assert [s.t_end for s in out] == [5444.236, 5454.658]
+    assert out[1].text == "Thank you.", "the text is kept — only the range was impossible"
+
+
+def test_bound_to_audio_drops_a_segment_that_starts_past_the_end():
+    """No audio under any of it. Flattening it onto the last instant would invent a moment."""
+    segs = [Segment(t_start=61.0, t_end=90.0, text="hallucinated")]
+    assert bound_to_audio(segs, 60.0) == []
+
+
+def test_bound_to_audio_leaves_segments_inside_the_audio_alone():
+    segs = [Segment(t_start=1.0, t_end=2.0, text="a"), Segment(t_start=2.0, t_end=60.0, text="b")]
+    assert bound_to_audio(segs, 60.0) == segs
+
+
+def test_bound_to_audio_is_silent_about_a_rounding_tick(capsys):
+    """0.02 s is whisper's timestamp quantum. Clamp it, but do not call it a hallucination."""
+    bound_to_audio([Segment(t_start=1.0, t_end=60.01, text="a")], 60.0)
+    assert capsys.readouterr().out == ""
+
+
+def test_bound_to_audio_reports_what_it_changed(capsys):
+    bound_to_audio([Segment(t_start=1.0, t_end=90.0, text="a")], 60.0, "piece-9.wav")
+    out = capsys.readouterr().out
+    assert "piece-9.wav" in out and "30.00s past the end" in out
+
+
+def test_bound_to_audio_does_nothing_without_a_duration():
+    """0.0 means the wav header could not be read — refuse to bound rather than drop it all."""
+    segs = [Segment(t_start=1.0, t_end=90.0, text="a")]
+    assert bound_to_audio(segs, 0.0) == segs
+
+
 # --- drop_impossible -----------------------------------------------------------------
 #
 # Found by running the split arm on dev video 701, not by reading it: whisper reported
@@ -539,7 +589,10 @@ def test_drop_impossible_is_silent_when_nothing_is_wrong(capsys):
 def test_groq_arm_drops_an_impossible_segment_rather_than_failing(tmp_path, meter, groq_key):
     """The arm has to hand the chunker something it will accept, or a whole video is lost."""
     rate = 16000
-    src = _wav(tmp_path / "short.wav", [100] * rate, rate=rate)
+    # 10 s of audio, because the segments below run to 8 s and the arm now holds segments
+    # inside the recording (transcript.bound_to_audio). A 1 s fixture would have them
+    # dropped for being past the end, which is a different rule than the one under test.
+    src = _wav(tmp_path / "short.wav", [100] * rate * 10, rate=rate)
 
     fake_client = MagicMock()
     fake_client.audio.transcriptions.create.return_value = SimpleNamespace(
@@ -559,7 +612,8 @@ def test_groq_arm_drops_an_impossible_segment_rather_than_failing(tmp_path, mete
 
 def test_groq_arm_returns_segments_in_time_order(tmp_path, meter, groq_key):
     rate = 16000
-    src = _wav(tmp_path / "short.wav", [100] * rate, rate=rate)
+    # 10 s, for the reason above: the segments below run to 6 s.
+    src = _wav(tmp_path / "short.wav", [100] * rate * 10, rate=rate)
 
     fake_client = MagicMock()
     fake_client.audio.transcriptions.create.return_value = SimpleNamespace(

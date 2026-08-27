@@ -64,7 +64,7 @@ from pathlib import Path
 from urllib.parse import urlencode, urlparse, urlunparse
 
 from schemas.answer import Answer
-from src.answer import AnswerRun
+from src.answer import AnswerRun, effective_model
 from src.answer import answer as answer_question
 from src.config import Config
 from src.config import load as load_config
@@ -506,7 +506,7 @@ def _footer_html(
     fingerprint = cfg.fingerprint()
     prompt_path, prompt_sha = prompt_fingerprint(cfg)
     rows = [
-        f"answer: {cfg.get('answer.arm')} · {cfg.get('answer.model')} · "
+        f"answer: {cfg.get('answer.arm')} · {effective_model(cfg)} · "
         f"temperature {cfg.get('answer.temperature')}",
         f"retrieval: {cfg.get('embed.model')} · top_k {cfg.get('retrieve.top_k')} · "
         f"{len(run.hits)} passage(s) retrieved",
@@ -682,7 +682,7 @@ def report(
     print(
         f"{len(calls)} model call(s), {sum(c.latency_s for c in calls):.2f}s, "
         f"${sum(c.cost_usd for c in calls):.4f}  "
-        f"(answer.arm={cfg.get('answer.arm')} {cfg.get('answer.model')})",
+        f"(answer.arm={cfg.get('answer.arm')} {run.model or effective_model(cfg)})",
         file=out,
     )
 

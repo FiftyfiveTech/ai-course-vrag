@@ -82,7 +82,7 @@ from schemas.api import (
     Spend,
     Video,
 )
-from src.answer import AnswerError, AnswerRun
+from src.answer import AnswerError, AnswerRun, effective_model
 from src.ask import (
     SAMPLES,
     AskError,
@@ -307,7 +307,7 @@ def provenance(run: AnswerRun, cfg: Config) -> Provenance:
     prompt_path, prompt_sha = prompt_fingerprint(cfg)
     return Provenance(
         arm=str(cfg.get("answer.arm")),
-        answer_model=str(cfg.get("answer.model")),
+        answer_model=run.model or effective_model(cfg),
         embed_model=str(cfg.get("embed.model")),
         top_k=int(cfg.get("retrieve.top_k")),
         retrieved=len(run.hits),
@@ -501,7 +501,7 @@ def create_app(cfg: Config | None = None):
             ),
             index=status,
             arm=str(cfg.get("answer.arm")),
-            answer_model=str(cfg.get("answer.model")),
+            answer_model=effective_model(cfg),
             embed_model=str(cfg.get("embed.model")),
             media_served=bool(cfg.get("api.serve_media")),
             config=cfg.fingerprint()["path"],
@@ -663,7 +663,7 @@ def main(argv: list[str] | None = None) -> int:
         else f"  index   EMPTY — {status.collection!r} at {status.path}. Run `make index-dev`; "
         "until then every question abstains."
     )
-    print(f"  answer  {cfg.get('answer.arm')} · {cfg.get('answer.model')}")
+    print(f"  answer  {cfg.get('answer.arm')} · {effective_model(cfg)}")
     print(f"  media   {'served from samples/' if cfg.get('api.serve_media') else 'off'}")
     print(f"  cors    {list(cfg.get('api.cors_origins')) or 'no browser origin allowed'}")
 

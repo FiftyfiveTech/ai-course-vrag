@@ -119,8 +119,32 @@ top_k = 5
 #
 # Switch between them without touching any Python:
 #   arm = "groq"    →  hosted, fast, free tier (rate-limited)
-#   arm = "ollama"  →  local, no rate limit, requires `ollama pull hf.co/openai/whisper-large-v3-turbo`
-arm = "ollama"
+#   arm = "ollama"  →  local — but NOT for this model. See below.
+#
+# This one does not currently have a local arm, and that is not a missing pull. Two
+# independent walls, both measured rather than assumed:
+#
+#   $ ollama pull hf.co/openai/whisper-large-v3-turbo
+#   Error: pull model manifest: 400: {"error":"Repository is not GGUF or is not compatible
+#   with llama.cpp"}
+#
+#   >>> import ollama; hasattr(ollama, "transcribe")
+#   False                                     # ollama 0.32.14 — src/transcript._ollama_arm
+#                                             # calls ollama.transcribe(), which is not there
+#
+# Ollama loads GGUF through llama.cpp; whisper is an encoder-decoder ASR model and is not
+# that, so `hf.co/<repo>` can never resolve for it — the same class of bug as the nomic id
+# in [embed], except that one had a -GGUF conversion to point at and this one does not.
+#
+# Flipping this to "ollama" does not fail at the pull, which is what makes it worth a
+# comment this long: it fails at the *cache check*. transcript_for() reuses a cached
+# transcript only when its recorded arm matches this value, so changing the arm invalidates
+# every transcript already on disk and sends a 90 minute video back through an arm that
+# cannot run — "no attribute 'transcribe'" on a file that was already transcribed.
+#
+# So the arm stays hosted, and a run with no GROQ_API_KEY cannot ingest new video. It can
+# still answer over an index that already exists: [answer] and [embed] both run locally.
+arm = "groq"
 
 # Model, named by its HF repo id. The arm translates this to whatever its API expects.
 model = "openai/whisper-large-v3-turbo"
@@ -194,26 +218,38 @@ overlap_s = 8.0
 #   arm = "groq"     hosted, free tier, strict JSON schema at generation time
 #   arm = "ollama"   local, no key, no network, no rate limit
 #
-# groq is the default, for two measured reasons.
+# groq is the default, and #25 argued for ollama — so this comment owes both sides.
 #
-# The gate's number was measured on it, and the local arm is a different model whose number
-# has to be re-measured rather than assumed (the table in the README). And it is 21× faster
-# on the phase that dominates a run — same question, same index, same code, only this lever
-# changed, measured with `make latency`:
+# The case for groq is measured. Same question, same index, same code, only this lever
+# changed, via `make latency`:
 #
 #   arm = "groq"     answer.generate  1.166s   41.0% of a  2.8s run
 #   arm = "ollama"   answer.generate 24.657s   92.5% of a 26.6s run
 #
-# Nothing else in the pipeline adds up to two seconds, so this line is the whole latency
-# story. It had been left on "ollama" after a day when Groq's free tier ran out of tokens,
-# with this comment still claiming groq — which is how a leftover survives: the value moved
-# and the reason it moved did not get written down.
+# 21× on the phase that dominates a run, and nothing else in the pipeline adds up to two
+# seconds. A 26-second answer is not a demo anyone sits through.
 #
-# The local arm is not decoration. It is what a run with no key and no network uses, and
-# src.answer._ask falls back to answer.ollama_model automatically on a Groq 429 — so
-# choosing groq here does not mean a rate limit stops the demo, it means the fast path is
-# the default and the slow one is the safety net. Set it to "ollama" deliberately for an
-# offline run; expect the numbers above.
+# And it is the arm the gate can pass. tests/gates/gate_phase2a.py pins
+# SCHEMA_VALID_THRESHOLD = 1.00 and reads ROOT/config.toml directly — there is no arm
+# override on the command line — while the README table puts the local model at 12/15
+# schema-valid and 1/3 abstentions. Measured both ways:
+#
+#   arm = "ollama"   gate_phase2a  3 failed,  7 passed   ·  make gate  5 failed, 50 passed
+#   arm = "groq"     gate_phase2a         10 passed      ·  make gate  1 failed, 54 passed
+#
+# The case for ollama was availability: no key, no rate limit, and it keeps working after
+# Groq's free tier spends its daily cap — which it did, mid-week, with the API returning 429
+# on the first live call through it. That is a real failure and it happened. It is answered
+# by the fallback rather than by the default: src.answer._ask already drops to
+# answer.ollama_model on a 429, so groq-as-default is not "breaks when capped", it is fast
+# path first and local safety net behind. What the fallback cannot do is make a gate pass,
+# and a default whose workaround is a manual "flip this first" written in a comment is the
+# failure mode `make gate` exists to catch.
+#
+# For a deliberately offline run — no key, no network, no cap — set "ollama" and expect the
+# numbers above. src.answer.effective_model() and AnswerRun.model (#25) mean every
+# report then names the model that actually answered, so a local run cannot be mistaken for
+# a hosted one.
 arm = "groq"
 
 # Model, by HF repo id. openai/gpt-oss-120b is the one model in this pipeline whose HF repo

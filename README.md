@@ -386,8 +386,25 @@ as abstentions. That is a **deliberate choice and a reversible one**: moving the
 `abstain ⇒ no citations` rule out of the schema and into `ground()`, which already normalises
 answers into abstentions, would score the local arm 15/15 with 3/3 abstentions and 2 repairs.
 It is not done here for one reason — it would make the VRAG-019 criterion (*schema-valid on
-100% of dev*) easier to pass, and the gate is measured on the configured arm, where the strict
-rule already scores 15/15. Flagged for review rather than decided quietly.
+100% of dev*) easier to pass, and 15/15 under a rule relaxed to reach it is not the same
+number. Flagged for review rather than decided quietly.
+
+This is one of the two reasons `answer.arm` defaults to `"groq"`.
+`tests/gates/gate_phase2a.py` pins `SCHEMA_VALID_THRESHOLD = 1.00` and reads `config.toml`
+directly — there is no arm override on the command line — and the table above is why that
+matters: 12/15 does not clear a 1.00 threshold. Measured both ways:
+
+| `answer.arm` | `gate_phase2a` | `make gate` |
+|---|---|---|
+| `"ollama"` | 3 failed, 7 passed | 5 failed, 50 passed |
+| `"groq"` | **10 passed** | 1 failed, 54 passed |
+
+The local arm does answer without a key or a daily cap, which is a real advantage and the
+reason the arm exists — but it is served by the *fallback* rather than by the default:
+`_ask()` drops to `answer.ollama_model` on a 429 automatically, so nothing about a spent
+free tier requires the slow model to be the default. What a fallback cannot do is make a
+gate pass, and a default whose workaround is a manual "flip this first" in a comment is
+the failure mode `make gate` exists to catch.
 
 The useful part is that the strict rule found a real behaviour difference between two models
 that both claim to honour a JSON schema. Constrained decoding gets the *shape* right in both;

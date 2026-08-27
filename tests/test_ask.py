@@ -22,6 +22,7 @@ import pytest
 
 from schemas.answer import Answer
 from src.answer import AnswerRun
+from src.answer import effective_model
 from src.ask import (
     AskError,
     Cite,
@@ -342,7 +343,10 @@ def test_the_page_records_what_produced_it(tmp_path):
     """A demo page with no provenance is a screenshot: it cannot be re-run."""
     html = page_for(run_with(answered([]), [chunk()]), [], tmp_path / "p.html")
     for expected in (
-        str(CONFIG.get("answer.model")),
+        # The model the configured arm actually runs, not answer.model — those differ on
+        # the local arm, and a footer naming the hosted id under a local run is provenance
+        # that points at a number never measured on it.
+        effective_model(CONFIG),
         str(CONFIG.get("embed.model")),
         str(CONFIG.get("answer.prompt")),
         "sha256:",

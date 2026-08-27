@@ -50,7 +50,7 @@ from src.config import Config, ConfigError
 from src.config import load as load_config
 from src.ingest import OUT_ROOT, IngestError, ingest, sha256_file
 from src.telemetry import Meter
-from src.transcript import Segment, TranscriptError, transcribe
+from src.transcript import Segment, TranscriptError, bound_to_audio, transcribe
 
 MANIFEST = Path("data/corpus/manifest.json")
 
@@ -404,7 +404,19 @@ def transcript_for(
             and payload.get("model") == cfg.get("transcript.model")
             and payload.get("arm") == cfg.get("transcript.arm")
         ):
-            return segments, media, "cache"
+            # A cached transcript is bounded on the way out as well as on the way in. The
+            # arms clamp each piece to its own audio (transcript.bound_to_audio), but a
+            # transcript.json written before they did still holds whisper's padded tail,
+            # and re-transcribing 90 minutes to drop one bad segment is nine hosted calls
+            # to fix something already on disk. Cheap, and it makes the cache and a fresh
+            # run agree - which is the property that stops "works after a refresh" bugs.
+            return (
+                bound_to_audio(
+                    segments, float(media["audio"]["duration_s"]), cache.name
+                ),
+                media,
+                "cache",
+            )
 
     wav = Path(media["audio"]["path"])
     if not wav.is_file():
