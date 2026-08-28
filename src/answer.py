@@ -62,13 +62,46 @@ from src.telemetry import Meter
 
 DEV_DIR = Path("evals/dev")
 
+# The two questions this module can be asked, named once so that the API's enum, the CLI's
+# flag and the branch in `answer()` cannot drift apart into three spellings of the same word.
+EXTRACTIVE = "extractive"  # five retrieved passages; declines what they do not state
+OVERVIEW = "overview"  # the whole video, from the document src.overview built
+MODES = (EXTRACTIVE, OVERVIEW)
+
 
 class AnswerError(Exception):
     """The answer path failed — message says which step and why."""
 
 
 class _GroqRateLimitError(AnswerError):
-    """Groq returned 429 — caller can fall back to the local arm."""
+    """Groq returned 429 — the per-minute bucket is empty and refills.
+
+    Transient. This is the one the local-arm fallback exists for: the same request, sent a
+    minute later or sent to Ollama now, completes.
+    """
+
+
+class _GroqRequestTooLargeError(AnswerError):
+    """Groq returned 413 — the request is bigger than the whole per-minute budget.
+
+    Permanent, and deliberately *not* the same class as a 429, because the correct handling
+    is the opposite one. Falling back here does not recover the work; it silently produces
+    the run on a different, much smaller model and labels it as this one.
+
+    Measured, on the free `on_demand` tier, building an overview for video 611:
+
+        413  {'code': 'rate_limit_exceeded', 'type': 'tokens'}
+        "Request too large for model `openai/gpt-oss-120b` ... on tokens per minute (TPM):
+         Limit 8000, Requested 17152"
+        x-ratelimit-remaining-tokens: 8000     <- a full bucket
+        x-should-retry: false                  <- the provider's own verdict
+
+    A full bucket is the whole point. Nothing was consumed by earlier traffic; a 13k-token
+    prompt asking for 4k completion simply cannot fit an 8k budget, so waiting changes
+    nothing. Groq reports both failures under `rate_limit_exceeded`, which is why the old
+    string match on "rate_limit" read this as throttling and fell back — and why every
+    overview build ran on a 3B local model until someone read the head of stderr.
+    """
 
 
 @dataclass(frozen=True)
@@ -106,6 +139,13 @@ class AnswerRun:
     # query vector for nothing.
     query: str = ""
 
+    # Which of the two questions was asked — `extractive` or `overview`. Recorded because it
+    # decides what `hits` even are: retrieved passages in one mode, the spans of a stored
+    # overview in the other. A reader of a run that could not tell the two apart would be
+    # comparing a 1.5 %-of-the-video answer with a whole-video one and calling them the same
+    # measurement.
+    mode: str = EXTRACTIVE
+
     @property
     def scoped(self) -> bool:
         return bool(self.scope)
@@ -124,7 +164,9 @@ class AnswerRun:
 # ---------------------------------------------------------------------------
 
 
-def answer(question: str, cfg: Config, meter: Meter) -> AnswerRun:
+def answer(
+    question: str, cfg: Config, meter: Meter, *, mode: str = EXTRACTIVE
+) -> AnswerRun:
     """Scope, retrieve, ask, validate, ground. Never raises on a bad model reply.
 
     A model that returns unparseable JSON is a result the gate has to be able to count, not
@@ -138,8 +180,23 @@ def answer(question: str, cfg: Config, meter: Meter) -> AnswerRun:
     because they run the same code. An unresolvable tag raises `MentionError`: the caller's
     input is what is wrong, not the pipeline, and quietly widening the search back to the
     whole index would answer a question nobody asked.
+
+    `mode` picks which of the two questions is being asked, and it is a parameter rather than
+    something inferred from the wording. `"extractive"` is retrieval: five passages, and a
+    prompt that declines anything they do not state. `"overview"` is the whole video: the
+    document `src.overview` built at index time, and a prompt that is allowed to synthesise.
+    Nothing here guesses between them — a question is routed by what the caller asked for, so
+    the extractive path and the numbers measured on it cannot move because someone phrased a
+    question differently.
     """
     scope = parse_scope(question, cfg)
+    if mode == OVERVIEW:
+        return _overview_run(question, scope, cfg, meter)
+    if mode != EXTRACTIVE:
+        raise AnswerError(
+            f"{mode!r} is not an answering mode. Use {EXTRACTIVE!r} or {OVERVIEW!r}."
+        )
+
     hits = retrieve(scope.text, cfg, meter, video_ids=scope.video_ids)
     with meter.stage("answer.prompt"):
         system, user = build_messages(scope.text, hits, cfg)
@@ -171,14 +228,92 @@ def answer(question: str, cfg: Config, meter: Meter) -> AnswerRun:
     return run(answer=grounded, repairs=repairs)
 
 
+def _overview_run(question, scope, cfg: Config, meter: Meter) -> AnswerRun:
+    """Answer a question about a whole video, from the overview built at index time.
+
+    The shape is deliberately the same as the extractive path below the model call: validate
+    against `Answer`, then `ground`. What changes is where the evidence comes from — the
+    spans of a stored overview instead of five retrieved chunks — and that is the only
+    difference a reader has to hold. Grounding, `to_citation`, `stream_url` and the player's
+    seek are all reached unchanged, so an overview citation is as clickable as any other.
+
+    One video, required. "What is this about?" with no `@` tag is not a question with a
+    missing answer, it is a question with a missing subject, and picking a video for the user
+    would answer something they did not ask. Two tags are the same problem twice.
+    """
+    from src.overview import as_chunks, load, render_overview
+
+    if len(scope.video_ids) != 1:
+        raise AnswerError(
+            "an overview answers one video, and this question is scoped to "
+            f"{scope.describe()}. Tag exactly one source — `@611 what is this about?` — "
+            "and ask again."
+        )
+    video_id = scope.video_ids[0]
+
+    stored = load(video_id)
+    if stored is None:
+        raise AnswerError(
+            f"video {video_id} has no overview on this host, so there is nothing to answer "
+            f"a whole-video question from. Build it: make overview VIDEO=<the file in "
+            f"samples/>."
+        )
+
+    hits = as_chunks(stored)
+    with meter.stage("answer.prompt"):
+        system, user = build_messages(
+            scope.text,
+            [],
+            cfg,
+            prompt=Path(cfg.get("overview.answer_prompt")),
+            context=render_overview(stored),
+        )
+
+    raw, tokens, used = _ask(system, user, cfg, meter)
+
+    def run(**kw) -> AnswerRun:
+        return AnswerRun(
+            question=question,
+            hits=hits,
+            raw=raw,
+            tokens=tokens,
+            model=used,
+            scope=scope.video_ids,
+            query=scope.text,
+            mode=OVERVIEW,
+            **kw,
+        )
+
+    try:
+        parsed = Answer.model_validate_json(raw)
+    except ValidationError as exc:
+        return run(answer=None, error=_terse(exc))
+    except ValueError as exc:
+        return run(answer=None, error=f"not valid JSON: {exc}")
+
+    with meter.stage("answer.ground"):
+        grounded, repairs = ground(parsed, hits)
+    return run(answer=grounded, repairs=repairs)
+
+
 def build_messages(
-    question: str, hits: list[RetrievedChunk], cfg: Config
+    question: str,
+    hits: list[RetrievedChunk],
+    cfg: Config,
+    *,
+    prompt: Path | None = None,
+    context: str | None = None,
 ) -> tuple[str, str]:
-    """The two messages, from the prompt file named in config. No prompt text lives here."""
-    system, template = load_prompt(Path(cfg.get("answer.prompt")))
-    user = template.replace("{{context}}", render_context(hits)).replace(
-        "{{question}}", question
-    )
+    """The two messages, from the prompt file named in config. No prompt text lives here.
+
+    `prompt` and `context` are the two seams the overview path needs (`src.overview`): a
+    different prompt file, and a context that is a whole video rather than a list of
+    retrieved passages. Both default to the extractive behaviour, so every existing caller
+    is unchanged and there is still one function that turns a prompt file into two messages.
+    """
+    system, template = load_prompt(Path(prompt or cfg.get("answer.prompt")))
+    body = render_context(hits) if context is None else context
+    user = template.replace("{{context}}", body).replace("{{question}}", question)
     return system, user
 
 
@@ -316,41 +451,144 @@ def effective_model(cfg: Config) -> str:
     return str(cfg.get("answer.model"))
 
 
-def _ask(system: str, user: str, cfg: Config, meter: Meter) -> tuple[str, int, str]:
+def _ask(
+    system: str,
+    user: str,
+    cfg: Config,
+    meter: Meter,
+    *,
+    schema: dict | None = None,
+    schema_name: str = "answer",
+    max_tokens: int | None = None,
+) -> tuple[str, int, str]:
     """Route to the configured arm.
 
     Returns the raw reply text, the tokens it cost, and the HF repo id of the model that
     produced it — the third is not always the configured one, because the groq arm falls
     back to the local model on a 429.
+
+    `schema` is what constrains generation, and it is a parameter rather than a constant so
+    that `src.overview` can ask for a `schemas.overview.Overview` through this same door.
+    Everything a caller cares about on the way — the arm choice, the 429 fallback to the
+    local model, the metering — is written once and applies to both shapes. Default is the
+    `Answer` schema, so every existing caller is unchanged.
     """
     arm = str(cfg.get("answer.arm")).strip().lower()
     model = cfg.get("answer.model")
     temperature = float(cfg.get("answer.temperature"))
-    max_tokens = int(cfg.get("answer.max_tokens"))
+    cap = int(cfg.get("answer.max_tokens")) if max_tokens is None else int(max_tokens)
+    shape = json_schema() if schema is None else schema
 
     if arm == "groq":
         ollama_model = str(cfg.get("answer.ollama_model"))
         try:
-            text, tokens = _groq_arm(system, user, model, temperature, max_tokens, meter)
+            text, tokens = _groq_arm(
+                system, user, model, temperature, cap, meter, shape, schema_name,
+                str(cfg.get("answer.reasoning_effort")),
+            )
             return text, tokens, str(model)
+        except _GroqRequestTooLargeError:
+            # Never falls back, whatever answer.fallback says. The local arm would happily
+            # answer, and the caller would record that answer as this run's — which is
+            # exactly how a 3B model's output came to be read as an overview prompt that
+            # did not work. A request that cannot fit is a bug in what was sent, and it has
+            # to reach a human rather than be papered over with a smaller model.
+            raise
         except _GroqRateLimitError:
+            if not bool(cfg.get("answer.fallback")):
+                raise
             print(
                 f"WARNING: Groq rate limit hit — falling back to ollama ({ollama_model})",
                 file=sys.stderr,
             )
             text, tokens = _ollama_arm(
-                system, user, ollama_model, temperature, max_tokens, meter
+                system, user, ollama_model, temperature, cap, meter, shape
             )
             return text, tokens, ollama_model
     if arm == "ollama":
         ollama_model = str(cfg.get("answer.ollama_model"))
         text, tokens = _ollama_arm(
-            system, user, ollama_model, temperature, max_tokens, meter
+            system, user, ollama_model, temperature, cap, meter, shape
         )
         return text, tokens, ollama_model
     raise AnswerError(
         f"config.toml: answer.arm is {arm!r}, which is not an arm. Use 'groq' or 'ollama'."
     )
+
+
+# How many times _groq_arm will send the same request before giving up on a 429. Three, not
+# more: this is a per-minute bucket, so two waits cover the worst honest case (a full minute
+# plus a partially-consumed one), and anything past that is a stuck job rather than a busy
+# provider. A 413 does not retry at all — see _GroqRequestTooLargeError.
+GROQ_ATTEMPTS = 3
+
+# Cap on a single wait, whatever the provider asks for. Groq's retry-after on a 429 has been
+# seen at 69 s; a value far past that means the tier is not going to serve this run and
+# sleeping on it just hides that behind a hang.
+GROQ_MAX_WAIT_S = 120
+
+# What to wait when the response carries no usable retry-after. One minute, because the
+# limit being ridden out is per-minute.
+GROQ_DEFAULT_WAIT_S = 60
+
+
+def _groq_retry_after_s(exc: Exception) -> int:
+    """Seconds to wait before resending, from the provider's own `retry-after` header.
+
+    Preferred over a fixed backoff because Groq states the refill time exactly, and guessing
+    either wastes wall clock or retries into the same wall. Falls back to one minute when the
+    header is absent or unparseable, and is capped either way.
+    """
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None)
+    raw = None
+    if headers is not None:
+        try:
+            raw = headers.get("retry-after")
+        except Exception:  # noqa: BLE001 - a header bag that will not be read is just absent
+            raw = None
+    try:
+        wait = int(float(raw))
+    except (TypeError, ValueError):
+        wait = GROQ_DEFAULT_WAIT_S
+    return max(1, min(wait, GROQ_MAX_WAIT_S))
+
+
+def _classify_groq_error(exc: Exception, model: str) -> AnswerError:
+    """Sort a provider exception into the three outcomes a caller can act on differently.
+
+    Groq reports *both* of its capacity failures with `code: rate_limit_exceeded`, and they
+    want opposite handling — see `_GroqRequestTooLargeError` for the measurement. So the
+    HTTP status is read first and the message text only as a fallback, because the status is
+    the field that actually separates them:
+
+        413  too large for the tier's per-minute budget. Permanent; do not fall back.
+        429  throttled. Transient; the local arm can carry this one call.
+
+    The status comes off the exception rather than out of the string because
+    `groq.APIStatusError` carries it, and `"413" in str(exc)` would also match a token count
+    that happened to contain those digits.
+    """
+    status = getattr(exc, "status_code", None)
+    if status is None:
+        response = getattr(exc, "response", None)
+        status = getattr(response, "status_code", None)
+
+    msg = str(exc)
+    lowered = msg.lower()
+
+    if status == 413 or "request too large" in lowered:
+        return _GroqRequestTooLargeError(
+            f"groq request too large ({model}): {msg}\n"
+            f"  This is not throttling — the request exceeds the tier's whole per-minute "
+            f"token budget, so retrying and waiting both fail. Send less context (for an "
+            f"overview, lower overview.max_context_chars or fold the transcript in "
+            f"windows), ask for fewer completion tokens, or run a model with a larger "
+            f"allowance."
+        )
+    if status == 429 or "rate_limit" in lowered or "rate limit" in lowered:
+        return _GroqRateLimitError(f"groq rate limit ({model}): {msg}")
+    return AnswerError(f"groq arm failed ({model}): {msg}")
 
 
 def _groq_wire_name(hf_repo_id: str) -> str:
@@ -380,6 +618,9 @@ def _groq_arm(
     temperature: float,
     max_tokens: int,
     meter: Meter,
+    schema: dict | None = None,
+    schema_name: str = "answer",
+    reasoning_effort: str = "",
 ) -> tuple[str, int]:
     try:
         import groq  # noqa: F401
@@ -394,33 +635,58 @@ def _groq_arm(
         )
 
     client = _groq_client(api_key)
+
+    # Only sent when the config asks for it, because it is not a universal parameter: the
+    # gpt-oss models take reasoning_effort, and a model that does not would 400 on it. An
+    # empty lever therefore means "send nothing" rather than "send a default".
+    #
+    # What it is for: gpt-oss thinks before it emits, and those reasoning tokens are charged
+    # against max_completion_tokens. On a fold window that produced a perfectly good abstract
+    # and six people, the JSON was still cut off before `topics` with the cap at 4000 -
+    # strict mode then rejected the whole reply for a missing property. The same window at
+    # reasoning_effort="low" finished in 1539 completion tokens. This is the lever that makes
+    # the completion cap affordable, and the completion cap is what the TPM budget is spent on.
+    extra = {"reasoning_effort": reasoning_effort} if reasoning_effort else {}
+
     t0 = time.perf_counter()
-    try:
-        response = client.chat.completions.create(
-            model=_groq_wire_name(model),
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            # Strict mode constrains generation to schemas.answer.json_schema(), so a
-            # reply that fails validation downstream means the schema handed to the model
-            # and the validator disagree — which is why both come off one declaration.
-            response_format={
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "answer",
-                    "strict": True,
-                    "schema": json_schema(),
+    for attempt in range(GROQ_ATTEMPTS):
+        try:
+            response = client.chat.completions.create(
+                model=_groq_wire_name(model),
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                # Strict mode constrains generation to schemas.answer.json_schema(), so a
+                # reply that fails validation downstream means the schema handed to the model
+                # and the validator disagree — which is why both come off one declaration.
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": schema_name,
+                        "strict": True,
+                        "schema": json_schema() if schema is None else schema,
+                    },
                 },
-            },
-            temperature=temperature,
-            max_completion_tokens=max_tokens,
-        )
-    except Exception as exc:
-        msg = str(exc)
-        if "429" in msg or "rate_limit" in msg.lower() or "rate limit" in msg.lower():
-            raise _GroqRateLimitError(f"groq rate limit ({model}): {exc}") from exc
-        raise AnswerError(f"groq arm failed ({model}): {exc}") from exc
+                temperature=temperature,
+                max_completion_tokens=max_tokens,
+                **extra,
+            )
+            break
+        except Exception as exc:
+            error = _classify_groq_error(exc, model)
+            # Only 429 is worth waiting out, and only while attempts remain. A 413 is
+            # permanent (the request cannot fit the budget at all) and anything else is not
+            # a capacity problem, so both go straight up.
+            if not isinstance(error, _GroqRateLimitError) or attempt == GROQ_ATTEMPTS - 1:
+                raise error from exc
+            wait = _groq_retry_after_s(exc)
+            print(
+                f"WARNING: Groq throttled ({model}), waiting {wait}s "
+                f"[attempt {attempt + 1}/{GROQ_ATTEMPTS}]",
+                file=sys.stderr,
+            )
+            time.sleep(wait)
 
     text = (response.choices[0].message.content or "").strip()
     usage = getattr(response, "usage", None)
@@ -436,6 +702,7 @@ def _ollama_arm(
     temperature: float,
     max_tokens: int,
     meter: Meter,
+    schema: dict | None = None,
 ) -> tuple[str, int]:
     try:
         import ollama
@@ -453,7 +720,7 @@ def _ollama_arm(
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
-            format=json_schema(),
+            format=json_schema() if schema is None else schema,
             options={"temperature": temperature, "num_predict": max_tokens},
         )
     except Exception as exc:

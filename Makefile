@@ -1,4 +1,4 @@
-.PHONY: sources setup doctor corpus corpus-check corpus-pointers heldout-check leakage-check sample sample-real sample-broken test gate gate-phase1 gate-phase2a demo chunks index index-dev probe answer answer-dev ask api openapi latency sweep sweep-dry coach clean
+.PHONY: overview sources setup doctor corpus corpus-check corpus-pointers heldout-check leakage-check sample sample-real sample-broken test gate gate-phase1 gate-phase2a demo chunks index index-dev probe answer answer-dev ask api openapi latency sweep sweep-dry coach clean
 .DEFAULT_GOAL := help
 
 # The video the demo ingests, and the file the levers are read from. Both overridable:
@@ -38,6 +38,9 @@ LATENCY_FLAGS ?=
 # Extra flags for `make index` / `make index-dev` — most often --reset.
 INDEX_FLAGS ?=
 
+# Extra flags for `make overview` — most often --refresh, which rebuilds a stored one.
+OVERVIEW_FLAGS ?=
+
 help:
 	@echo "make setup   create the venv and install deps (uv)"
 	@echo "make doctor  check every dependency and credential; non-zero on FAIL"
@@ -64,6 +67,7 @@ help:
 	@echo "make api     the same answer over HTTP, for a frontend to call; /docs for the schema"
 	@echo "make openapi print the OpenAPI document and exit; no server, no network"
 	@echo "make latency which phase ate the wall clock last session; LATENCY_FLAGS=--list for older"
+	@echo "make overview VIDEO=<file|id>  build the whole-video document the overview mode answers from"
 	@echo "make sources which videos an @tag can name; scope a question with make ask Q=\"@611 ...\""
 	@echo "make sweep    re-measure the chunking sweep behind the VRAG-018 primer (~22 min, zero spend)"
 	@echo "make sweep-dry  the same grid, chunk counts only - no embedding, seconds"
@@ -204,6 +208,23 @@ gate-phase2a: leakage-check
 # tests/gates/README says no gate result counts until dev and held-out are known disjoint.
 gate-phase1: leakage-check
 	uv run pytest tests/gates/gate_phase1.py -v -s
+
+# What a whole video IS, as opposed to what it says at one moment. Built once, at index
+# time, into runs/<stem>/overview.json, and answered against by `mode: "overview"`.
+#
+# Reads the chunks back out of Chroma, so the video has to be indexed first (`make index`).
+#
+# It FOLDS, and that is not an optimisation. No real transcript fits one call on Groq's free
+# tier: the tier meters tokens per minute, the limit is 8000, and video 611 in one pass asked
+# for 17152. So the transcript is cut into windows of overview.max_context_chars, each is
+# summarised on its own, and the partials are merged — people and topics in code, so no span
+# can be invented, and one small call for the abstract. Expect a few minutes and one line of
+# progress per window on stderr; 611 is 6 windows in ~3 min.
+#
+#   make overview VIDEO=samples/bob-video.mp4
+#   make overview VIDEO=611 OVERVIEW_FLAGS=--refresh
+overview:
+	uv run python -m src.overview "$(VIDEO)" --config $(CONFIG) $(OVERVIEW_FLAGS)
 
 # THE DEMO - VRAG-020. Question in, answer out, and a static HTML page under runs/ask/
 # whose citations seek a player to the second they came from. No server, no build step:
