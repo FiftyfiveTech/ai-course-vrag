@@ -1,4 +1,4 @@
-.PHONY: overview sources setup doctor corpus corpus-check corpus-pointers heldout-check leakage-check sample sample-real sample-broken test gate gate-phase1 gate-phase2a demo chunks index index-dev probe answer answer-dev ask api openapi latency sweep sweep-dry coach clean
+.PHONY: overview sources setup doctor corpus corpus-check corpus-pointers heldout-check leakage-check sample sample-real sample-broken test gate gate-phase1 gate-phase2a demo chunks index index-dev probe answer answer-dev ask api openapi latency sweep sweep-dry coach clean docker-build docker-up docker-down docker-doctor docker-test docker-gate docker-shell
 .DEFAULT_GOAL := help
 
 # The video the demo ingests, and the file the levers are read from. Both overridable:
@@ -72,6 +72,14 @@ help:
 	@echo "make sweep    re-measure the chunking sweep behind the VRAG-018 primer (~22 min, zero spend)"
 	@echo "make sweep-dry  the same grid, chunk counts only - no embedding, seconds"
 	@echo "make coach   open the coach page: the sweep as a chart you can move the levers on"
+	@echo ""
+	@echo "containers (compose.yaml: app + ollama; see the Dockerfile for what is in the image)"
+	@echo "make docker-build   build the toolbox image"
+	@echo "make docker-up      start ollama, pull the F16 embedding model, start the api"
+	@echo "make docker-doctor  the same env check, inside the container; non-zero on FAIL"
+	@echo "make docker-test    unit tests inside the container"
+	@echo "make docker-gate    every phase gate inside the container — the reproducible run"
+	@echo "make docker-down    stop everything"
 
 setup:
 	@command -v uv >/dev/null || { echo "uv not installed: curl -LsSf https://astral.sh/uv/install.sh | sh"; exit 1; }
@@ -314,6 +322,54 @@ coach: docs/learning/coach.html
 
 docs/learning/coach.html: tools/build_coach.py docs/learning/data/chunking_sweep.json
 	uv run python tools/build_coach.py
+
+# ----------------------------------------------------------------------------- containers
+#
+# The image is a toolbox, not a server: it runs the pipeline, the gates and the API, because
+# this repo's discipline is that a supervisor re-runs a gate command and compares output
+# (CLAUDE.md). An image that could only serve /ask could not be handed to one.
+#
+# Two services (compose.yaml): `app`, and `ollama` with its model volume. Ollama is not
+# optional — src/embed.py and src/retrieve.py call `ollama.embed` and there is no hosted
+# embedding arm, so nothing retrieves without it.
+#
+# Secrets are read from your shell, never from a committed file. Export them first, or put
+# them in ~/.config/ai-course-vrag.env and source it:
+#   export GROQ_API_KEY=... HF_TOKEN=... NVIDIA_API_KEY=...
+
+COMPOSE ?= docker compose
+
+docker-build:
+	$(COMPOSE) build
+
+# Brings up ollama, waits for it to be healthy, pulls the F16 embedding model into its
+# volume, then starts the app. The first run is slow — ~274 MB of weights — and every run
+# after it is not, because the volume persists.
+docker-up:
+	$(COMPOSE) up -d
+	@echo "api on http://127.0.0.1:8000  —  next: make docker-doctor"
+
+docker-down:
+	$(COMPOSE) down
+
+# Same check the Dockerfile uses as its HEALTHCHECK: ffmpeg, ffprobe, the daemon over
+# OLLAMA_HOST, the embedding model's tag, every credential. Non-zero if a required one fails.
+# Run this before believing anything else in this section.
+docker-doctor:
+	$(COMPOSE) exec app make doctor
+
+docker-test:
+	$(COMPOSE) exec app make test
+
+# The point of containerising at all: a gate run that does not depend on what is installed
+# on the machine that runs it. Needs GROQ_API_KEY in the environment `make docker-up` saw —
+# gate_phase2a makes 15 hosted calls and a gate that cannot run is a FAIL, not a skip.
+docker-gate:
+	$(COMPOSE) exec app make gate
+
+# A shell in the app container, for when a target above is not the question.
+docker-shell:
+	$(COMPOSE) exec app bash
 
 clean:
 	rm -rf .venv .pytest_cache **/__pycache__ .devids

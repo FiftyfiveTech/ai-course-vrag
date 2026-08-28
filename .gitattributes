@@ -8,3 +8,8 @@
 # Same reason, one step removed: `make corpus-check` asserts the manifest reproduces
 # byte-for-byte against the pinned dataset revision (VRAG-004).
 data/corpus/manifest.json text eol=lf
+
+# Same reason again, and this one bites inside a container rather than in a digest:
+# docker/ollama-init.sh is bind-mounted into the ollama image and run by `sh`. Checked out
+# with CRLF it fails on `set -eu\r` with an error that names neither the file nor the cause.
+*.sh text eol=lf

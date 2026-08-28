@@ -106,6 +106,34 @@ def _ollama_host(env: dict[str, tuple[str, str]]) -> str:
     return host.rstrip("/")
 
 
+def check_ollama_binary(daemon: Check) -> Check:
+    """The `ollama` CLI, but only FAIL when the daemon is unreachable too.
+
+    Split out of `check_binary` because the binary and the daemon are two different claims
+    and only one of them is required. What the pipeline needs is a *reachable daemon* —
+    src/embed.py and src/retrieve.py call `ollama.embed` over HTTP at OLLAMA_HOST and never
+    shell out. The CLI matters for `ollama pull`, which is how a model gets there.
+
+    In the container stack those two live in different places on purpose: ollama is its own
+    service (compose.yaml), so the app image ships no CLI and pulls nothing — `ollama-init`
+    does. Reporting FAIL there would mean `make doctor` is red on a container that is fully
+    able to work, which makes the healthcheck useless exactly where it is load-bearing.
+
+    So: daemon reachable and no CLI is a WARN that says where the CLI would be needed.
+    Neither one is the FAIL it has always been.
+    """
+    check = check_binary("ollama", ["--version"], "local model arm; see https://ollama.com")
+    if check.status == FAIL and daemon.status == PASS:
+        return Check(
+            "binaries",
+            "ollama",
+            WARN,
+            f"no CLI on PATH, but the daemon is up ({daemon.detail}) - "
+            f"fine for querying; `ollama pull` has to run where the daemon is",
+        )
+    return check
+
+
 def check_ollama_daemon(env: dict[str, tuple[str, str]]) -> tuple[Check, list[str]]:
     """Reachability of the local daemon, plus the model tags it reports."""
     host = _ollama_host(env)
@@ -150,9 +178,12 @@ def collect() -> list[Check]:
     checks.append(check_binary("uv", ["--version"], "the env manager; see https://astral.sh/uv"))
     checks.append(check_binary("ffmpeg", ["-version"], "audio extraction (VRAG-005)"))
     checks.append(check_binary("ffprobe", ["-version"], "media metadata (VRAG-005)"))
-    checks.append(check_binary("ollama", ["--version"], "local model arm; see https://ollama.com"))
 
+    # The daemon is resolved before the CLI because the CLI's verdict depends on it — see
+    # check_ollama_binary. Appending in this order keeps the CLI in the "binaries" section
+    # where it reads, while the decision uses what the daemon reported.
     daemon, tags = check_ollama_daemon(env)
+    checks.append(check_ollama_binary(daemon))
     checks.append(daemon)
     checks.extend(check_ollama_models(tags))
 

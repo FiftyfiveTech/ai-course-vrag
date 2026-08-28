@@ -1,0 +1,36 @@
+# What must never enter the image.
+#
+# The first block is a licence boundary, not an optimisation. Video-MME's terms forbid
+# redistributing the media (data/corpus/PROVENANCE.md), and the corpus is pointers, not
+# copies. An image layer is a copy, and a pushed image is redistribution. `samples/` and
+# `runs/` are volumes at run time (see compose.yaml) precisely so the media reaches the
+# container without ever being baked into it.
+samples/
+runs/
+chroma/
+*.mp4
+*.wav
+*.mkv
+*.webm
+*.m4a
+
+# Secrets live in ~/.config/ and reach the container as environment variables (CLAUDE.md).
+# src/env.py gives the process environment highest precedence, so nothing needs .env to be
+# present. Baking one in would ship a credential inside a layer that `docker history` reads.
+.env
+
+# Build artefacts of the host. .venv/ especially: it holds platform-specific wheels built
+# for the host OS, and copying a Windows venv into a Linux image produces an environment
+# that imports nothing.
+.venv/
+__pycache__/
+**/__pycache__/
+*.pyc
+.pytest_cache/
+.git/
+.gitignore
+.gitattributes
+
+# Generated, and committing it would give a frontend two contracts to disagree about
+# (see the `openapi` target in the Makefile).
+openapi.json
