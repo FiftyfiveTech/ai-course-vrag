@@ -665,7 +665,7 @@
   }
 
   /**
-   * Seek a player, waiting for its metadata first if it has not arrived.
+   * Seek a player, waiting for its metadata first if it has not arrived, and start it.
    *
    * Assigning `currentTime` before `readyState >= HAVE_METADATA` is silently a no-op: the
    * element does not yet know its duration, so it has nothing to seek within. The failure
@@ -674,14 +674,24 @@
    * is why it showed up on one screenshot and not the next: it only bites when a citation is
    * activated before the first bytes of `/media/{id}` come back, which is exactly what the
    * auto-activated first citation does on a cold load.
+   *
+   * So the seek waits and `play()` does not, and the split is the point. A gesture only
+   * authorises playback for as long as the browser considers it live: Safari wants the
+   * `play()` inside the handler the click ran, and a `play()` posted from `loadedmetadata`
+   * a few hundred milliseconds later is a different task with no gesture behind it. Calling
+   * it here keeps it in the click, and the deferred `currentTime` still lands — playback
+   * has not begun by the time metadata arrives, so there is nothing to jump.
    */
   function seek(video, seconds) {
-    function go() {
-      video.currentTime = seconds;
-      video.play().catch(function () { /* autoplay policy; the seek still landed */ });
-    }
-    if (video.readyState >= 1) { go(); }
-    else { video.addEventListener('loadedmetadata', go, { once: true }); }
+    function land() { video.currentTime = seconds; }
+    if (video.readyState >= 1) { land(); }
+    else { video.addEventListener('loadedmetadata', land, { once: true }); }
+    // Rejects on a page the browser thinks nobody asked anything of — a `/?q=…` deep link
+    // answers and auto-activates its first citation with no click anywhere in the document,
+    // and no amount of code makes that autoplay. The seek still landed; the viewer presses
+    // play. Anything louder here would be reporting a policy as a bug.
+    var started = video.play();
+    if (started && started.catch) { started.catch(function () {}); }
   }
 
   function playerFor(c, index) {

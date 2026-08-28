@@ -419,6 +419,23 @@ def test_a_seeking_player_gets_a_206_and_a_content_range(tmp_path, monkeypatch):
     assert len(r.content) == 100
 
 
+def test_a_locally_ingested_video_is_served_under_its_own_id(tmp_path, monkeypatch):
+    """`samples/bob-video.mp4` — ingested here, so no `_<ytid>` to match on.
+
+    This is the whole failure the user saw: the video indexed, got cited, and the citation
+    said "no playable copy" because the id resolved to no file. A 404 here is a player the
+    frontend never draws.
+    """
+    samples = tmp_path / "samples"
+    samples.mkdir(exist_ok=True)
+    media = samples / "bob-video.mp4"
+    media.write_bytes(bytes(range(256)) * 32)
+    monkeypatch.setattr("src.api.SAMPLES", samples)
+    r = client(write_config(tmp_path)).get("/media/bob-video", headers={"Range": "bytes=0-99"})
+    assert r.status_code == 206
+    assert r.headers["content-range"] == f"bytes 0-99/{media.stat().st_size}"
+
+
 def test_a_range_past_the_end_is_a_416(tmp_path, monkeypatch):
     media = fake_media(tmp_path)
     monkeypatch.setattr("src.api.SAMPLES", tmp_path / "samples")

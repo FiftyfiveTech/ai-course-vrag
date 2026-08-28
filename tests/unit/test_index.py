@@ -202,6 +202,24 @@ def test_local_file_does_not_match_a_different_id_that_shares_a_prefix(tmp_path)
     assert local_file("52", tmp_path) is None
 
 
+def test_local_file_matches_a_locally_ingested_video_named_after_its_id(tmp_path):
+    """A video ingested here has no youtube id to append, so it lands as `<id>.<ext>`.
+
+    Globbing only `<id>_*` made such a video answerable but unplayable: it indexed and got
+    cited, then `media_url` found no file, `stream_url` came back null and the frontend drew
+    "no playable copy" over a video sitting in samples/.
+    """
+    (tmp_path / "bob-video.mp4").write_bytes(b"x")
+    found = local_file("bob-video", tmp_path)
+    assert found is not None and found.name == "bob-video.mp4"
+
+
+def test_local_file_does_not_match_a_shared_prefix_through_the_dotted_form(tmp_path):
+    """The dot is as load-bearing as the underscore: '61' must not claim '611.mp4'."""
+    (tmp_path / "611.mp4").write_bytes(b"x")
+    assert local_file("61", tmp_path) is None
+
+
 def test_local_file_is_none_when_samples_does_not_exist(tmp_path):
     assert local_file("181", tmp_path / "nope") is None
 
