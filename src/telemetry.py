@@ -63,6 +63,19 @@ RATES: dict[str, tuple[str, float]] = {
     "openai/gpt-oss-20b": (_UNIT_TOKENS, 0.0),
     # The local arm's generator (arm = "ollama"). Local, so $0.00 is the real rate.
     "bartowski/Llama-3.2-3B-Instruct-GGUF:Q4_K_M": (_UNIT_TOKENS, 0.0),
+    # Keyframe captions, VRAG-023. The hosted arm runs on NVIDIA NIM's free tier and the local
+    # arm runs on this laptop, so $0.00 is the real rate for both *as we run them* — the same
+    # situation as the two gpt-oss rows above, and the entries exist for the same reason: a
+    # model absent from this table is indistinguishable from a model that is free, because
+    # RATES.get() defaults to zero silently.
+    #
+    # Deliberately NOT carrying a modelled paid rate, unlike the whisper row. The whisper
+    # figure is $0.04/audio-hour off Groq's published price list; no equivalent per-token price
+    # for these two was in front of us when this landed, and inventing one would put a number
+    # in a cost table that no command produced. The two-arm table therefore reports tokens,
+    # latency and calls — which are measured — and $0.00, which is true.
+    "meta-llama/Llama-3.2-11B-Vision-Instruct": (_UNIT_TOKENS, 0.0),
+    "ggml-org/Qwen2.5-VL-3B-Instruct-GGUF:Q4_K_M": (_UNIT_TOKENS, 0.0),
 }
 
 

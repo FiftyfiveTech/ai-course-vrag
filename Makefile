@@ -1,4 +1,4 @@
-.PHONY: overview sources setup doctor corpus corpus-check corpus-pointers heldout-check leakage-check sample sample-real sample-broken test gate gate-phase1 gate-phase2a demo chunks index index-dev probe answer answer-dev ask api openapi latency sweep sweep-dry coach clean docker-build docker-up docker-down docker-doctor docker-test docker-gate docker-shell
+.PHONY: overview captions caption-arms sources setup doctor corpus corpus-check corpus-pointers heldout-check leakage-check sample sample-real sample-broken test gate gate-phase1 gate-phase2a demo chunks index index-dev probe answer answer-dev ask api openapi latency sweep sweep-dry coach clean docker-build docker-up docker-down docker-doctor docker-test docker-gate docker-shell
 .DEFAULT_GOAL := help
 
 # The video the demo ingests, and the file the levers are read from. Both overridable:
@@ -41,6 +41,12 @@ INDEX_FLAGS ?=
 # Extra flags for `make overview` — most often --refresh, which rebuilds a stored one.
 OVERVIEW_FLAGS ?=
 
+# Extra flags for `make captions` — most often --arm ollama, or --limit N to cap vision calls.
+CAPTION_FLAGS ?=
+
+# Extra flags for `make caption-arms` — most often --limit N (0 for every selected stretch).
+ARMS_FLAGS ?=
+
 help:
 	@echo "make setup   create the venv and install deps (uv)"
 	@echo "make doctor  check every dependency and credential; non-zero on FAIL"
@@ -69,6 +75,8 @@ help:
 	@echo "make latency which phase ate the wall clock last session; LATENCY_FLAGS=--list for older"
 	@echo "make overview VIDEO=<file|id>  build the whole-video document the overview mode answers from"
 	@echo "make sources which videos an @tag can name; scope a question with make ask Q=\"@611 ...\""
+	@echo "make captions VIDEO=<file|id>  read the text off slide-heavy keyframes (VRAG-023)"
+	@echo "make caption-arms VIDEO=<file|id>  THE VRAG-023 TABLE: hosted vs local, cost measured"
 	@echo "make sweep    re-measure the chunking sweep behind the VRAG-018 primer (~22 min, zero spend)"
 	@echo "make sweep-dry  the same grid, chunk counts only - no embedding, seconds"
 	@echo "make coach   open the coach page: the sweep as a chart you can move the levers on"
@@ -233,6 +241,44 @@ gate-phase1: leakage-check
 #   make overview VIDEO=611 OVERVIEW_FLAGS=--refresh
 overview:
 	uv run python -m src.overview "$(VIDEO)" --config $(CONFIG) $(OVERVIEW_FLAGS)
+
+# VRAG-023, THE STRETCH TASK. Reads the text off the frames where something is holding still
+# on screen — a slide, a shared window, a title card — and writes runs/<stem>/captions.json.
+#
+# Needs the frames ingest already sampled (`make chunks` or `make index`), and nothing else:
+# it does not read the transcript and it does not touch the index.
+#
+# The cost lever is the SELECTION, not the model. `ingest.frames.fps = 0.2` leaves 1091 frames
+# for the 91-minute client meeting; captioning all of them is 1091 vision calls. A slide holds
+# still, so ffmpeg's per-frame scene score picks out the stretches where the picture barely
+# changes and one keyframe stands in for each — 1091 -> 64. The grid behind the two levers that
+# do that is in config.toml [caption]; it is what makes "slide-heavy" measured rather than said.
+#
+# Arms: hosted is NVIDIA NIM (NVIDIA_API_KEY) — Groq serves no vision model, which was checked.
+# Local is Ollama, and needs the pull, WITH the tag and from a repo that has an mmproj:
+#   ollama pull hf.co/ggml-org/Qwen2.5-VL-3B-Instruct-GGUF:Q4_K_M
+#
+#   make captions VIDEO=samples/vector7-21aug-client-meeting.mp4
+#   make captions VIDEO=611 CAPTION_FLAGS="--arm ollama --limit 3"
+captions:
+	uv run python -m src.caption "$(VIDEO)" --config $(CONFIG) $(CAPTION_FLAGS)
+
+# THE VRAG-023 DELIVERABLE: the same keyframes through both arms, and what each one cost.
+#
+# Selects once and hands the identical list to both arms, so the arm is the only variable.
+# Writes docs/learning/data/caption_arms.json and prints two tables — what was measured, and
+# what a whole video is projected to cost at that per-call rate.
+#
+# Zero spend: NIM's free tier and a local model, $0.00 on both rows. What differs between the
+# arms is tokens and seconds, which is what the table is actually for.
+#
+# Defaults to 10 keyframes per arm — the point is a per-call number, and 20 calls teach what
+# 128 would. ARMS_FLAGS="--limit 0" captions every selected stretch.
+#
+#   make caption-arms VIDEO=samples/vector7-21aug-client-meeting.mp4
+#   make caption-arms VIDEO=611 ARMS_FLAGS="--limit 5 --arm ollama"
+caption-arms:
+	uv run python tools/caption_arms.py "$(VIDEO)" --config $(CONFIG) $(ARMS_FLAGS)
 
 # THE DEMO - VRAG-020. Question in, answer out, and a static HTML page under runs/ask/
 # whose citations seek a player to the second they came from. No server, no build step:

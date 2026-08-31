@@ -27,7 +27,9 @@ other person as a collaborator with push access.
 | `prompts/` | Versioned prompt files. `answer_v1.md` is the Phase 2 answering prompt; its `## System` / `## User` sections are the messages, the rest is commentary. Never inline a prompt in code. |
 | `schemas/` | Pydantic models. `answer.py` is the `{answer, citations[], abstain}` contract — one declaration, used both to constrain generation and to validate the reply. `api.py` is the HTTP contract `make api` serves and `/docs` renders. |
 | `web/` | The frontend `make api` serves at `/` — three static files, no build step. Same origin as the API, so a citation's root-relative `stream_url` resolves and no CORS entry is needed. |
-| `docs/learning/` | The concept primer and the coach page (VRAG-018), plus the sweep JSON behind both. `make sweep` re-measures, `make coach` re-renders. |
+| `docs/learning/` | The concept primer and the coach page (VRAG-018), plus the sweep JSON behind both. `make sweep` re-measures, `make coach` re-renders. Also `caption_arms.json`, the VRAG-023 two-arm cost table. |
+| `src/keyframes.py` | Which frames are worth a vision call (VRAG-023). Pure selection: ffmpeg scene scores in, still stretches out. No model, no network. |
+| `src/caption.py` | Reads the text off those keyframes, hosted arm or local. Writes `runs/<stem>/captions.json` and **nothing to the index** — see [Keyframe captions](#keyframe-captions-vrag-023). |
 | `evals/dev/` | **Builder** tunes here. 15 cases (`dev_v1.jsonl`): 12 answerable, 3 not. Written from the transcripts, not from watching — see [evals/dev/README.md](evals/dev/README.md) before quoting a number from them. |
 | `evals/heldout/` | **Evaluator** only. Sealed Wednesday, tagged `heldout-v1`. The Builder never reads it. |
 | `evals/QA_SPEC.md` | What a correct citation is (±30 s), what counts as unanswerable, how the gate scores. |
@@ -946,6 +948,157 @@ worse than a wordmark that is obviously type.
 
 A checkout without `web/` is not broken — `GET /` falls back to redirecting to `/docs`, the way
 it did before there was a UI, and `tests/unit/test_api.py` pins both branches.
+
+## Keyframe captions (VRAG-023)
+
+Five of the seventeen answerable held-out pairs turn on something on **screen** rather than
+something said, and one is on a video with no speech at all (`STANDUP.md`, VRAG-012). A
+transcript-only index cannot reach those however good retrieval gets.
+
+`make captions` measures what closing that gap would cost. It does not close it — see
+[Nothing here is indexed](#nothing-here-is-indexed).
+
+```
+make captions VIDEO=samples/vector7-21aug-client-meeting.mp4
+make caption-arms VIDEO=samples/vector7-21aug-client-meeting.mp4   # the two-arm table
+```
+
+### The cost lever is the selection, not the model
+
+`ingest.frames.fps = 0.2` already left 1091 frames for the 91-minute client meeting and 3086
+across the four dev videos. Captioning all of them is the cost, and it is the cost whether or
+not the frames were worth reading.
+
+A slide is worth reading and it holds still. So `src/keyframes.py` runs one extra ffmpeg pass
+over the **already-extracted frames** as an image sequence, using `select` as a measuring
+instrument rather than a filter — `gte(scene,0)` is always true, so every frame prints its own
+"how different is this from the last one" score:
+
+```
+ffmpeg -framerate 1 -i runs/<stem>/frames/frame_%05d.jpg        -vf "select='gte(scene,0)',metadata=print" -an -f null -
+```
+
+That score separates a screen-share from a documentary by about 6×:
+
+| video | n | median score | frac < 0.02 |
+|---|---|---|---|
+| `vector7-21aug-client-meeting` (screen share) | 1090 | 0.0012 | **86.5%** |
+| `bob-video` | 679 | 0.0220 | 45.2% |
+| `701_-dfvdKf-KR0` | 653 | 0.0987 | 14.2% |
+| `611_H8fGd3fCJbg` (documentary) | 360 | 0.1481 | 14.4% |
+
+Collapsing each still stretch to one keyframe, at the shipped `still_threshold = 0.02` and
+`min_run_frames = 3`:
+
+| video | vision calls | still runs cover |
+|---|---|---|
+| meeting | 1091 → **64** (17.0×) | **90.6%** of 5455 s |
+| `bob-video` | 680 → 62 (11.0×) | 39.6% |
+| `701` | 654 → 12 (54.5×) | 6.1% |
+| `611` | 361 → 7 (51.6×) | 6.9% |
+
+**The coverage column is what makes "slide-heavy" measured rather than asserted.** The same two
+levers select almost the whole screen-share and almost none of the documentary, and no number in
+either table came from watching a video.
+
+`min_run_frames` is the lever that does that discriminating, and it is fragile in one direction.
+At `still_threshold = 0.05, min_run_frames = 2` the rule selects *more* stretches from the
+documentary (65) than from the screen share (63) — a threshold loose enough to catch every slide
+catches every slow pan as well. The full grid is in `config.toml` `[caption]`.
+
+### Two arms, and the hosted one is not Groq
+
+`client.models.list()` on our Groq key returns fourteen models and not one of them takes an
+image — the same fact `[answer]` records from the other side. So the hosted arm is **NVIDIA
+NIM**, the provider `src/doctor.py` already calls "hosted fallback" and already checks a
+credential for.
+
+| arm | HF repo id | where it runs |
+|---|---|---|
+| `nim` | `meta-llama/Llama-3.2-11B-Vision-Instruct` | NVIDIA NIM free tier (`NVIDIA_API_KEY`) |
+| `ollama` | `ggml-org/Qwen2.5-VL-3B-Instruct-GGUF:Q4_K_M` | this laptop |
+
+Both id translations are facts that had to be looked up, not derived. NIM answers to
+`meta/llama-3.2-11b-vision-instruct` — a different owner, so no case transform would produce it
+— and `src.caption.NIM_WIRE_NAMES` raises on an unknown id rather than guessing. That is the
+third distinct rule in this repo: whisper's Groq id drops the owner, nomic's needs a `-GGUF`
+suffix that only exists on a converted repo, gpt-oss's happens to match.
+
+The local repo id was chosen because it carries an **`mmproj-*.gguf` projector** next to the
+weights, checked on the HF API before the line was written. Without one, Ollama loads a vision
+model that cannot see the image and captions every frame from the prompt alone. The `:Q4_K_M`
+tag is explicit for the reason `[embed]` documents at length — an untagged
+`ollama pull hf.co/<repo>` takes the repo's smallest file.
+
+### The table
+
+`make caption-arms` selects keyframes **once** and hands the identical list to both arms, so the
+arm is the only variable. 10 keyframes each, on the client meeting:
+
+```
+arm     model (HF repo id)                           calls  tokens tok/call  s/call  yield  chars      $
+hosted  meta-llama/Llama-3.2-11B-Vision-Instruct        10   37612   3761.2    9.42  100%   1087   0.00
+local   ggml-org/Qwen2.5-VL-3B-Instruct-GGUF:Q4_K_M     10   15984   1598.4   19.58  100%    506   0.00
+
+PROJECTED to all 64 stretches of a 91-minute video
+arm      calls   tokens  seconds  s/video-hour  $/video-hour
+hosted      64   240716    603.0         398.0        0.0000
+local       64   102297   1253.1         827.0        0.0000
+```
+
+**$0.00 on both rows is the true number, not a placeholder** — NIM's free tier and a local
+model. `src/telemetry.py` carries both at rate 0.0 and deliberately carries no *modelled* paid
+rate: a price nobody looked up is a number in a cost table that no command produced. So what the
+arms actually cost is spent in the other columns, and they do not cost the same thing:
+
+- **the hosted arm is ~2× faster** per call and read about twice as much text per frame;
+- **the local arm spends 2.4× fewer tokens** (1598 vs 3761 per call) — the hosted model's image
+  tokenisation is much heavier than the 3B's;
+- and the local arm needs no key, no network, and no free tier that can be spent.
+
+One caveat that only a second run exposed, and it is a large one: **the local arm measured
+87.65 s/call on its first run and 19.58 s/call on its second**, same code, same frames. The
+first run paid a cold load of 2.8 GB of weights into RAM; the second found the model resident in
+Ollama. The 19.58 figure is the steady-state one and the table above is the warm run — a
+single-run local benchmark on a freshly pulled model measures the disk, not the model.
+
+The `--limit 10` default is deliberate. The point is a per-call number, and the meeting selects
+64 stretches, so an unlimited run would be 128 vision calls to learn what 20 teaches. Everything
+under **PROJECTED** is arithmetic from the measured per-call rate over all 64 stretches, and is
+labelled as a projection wherever it is printed. `ARMS_FLAGS="--limit 0"` captions every one.
+
+Only **counts** reach `docs/learning/data/caption_arms.json` — how many characters a caption had
+and whether it had any, never the text. `data/corpus/PROVENANCE.md` forbids redistributing
+Video-MME content and a caption is that content transcribed; the same rule `tools/sweep_chunking.py`
+follows for chunk text. The captions themselves stay in `runs/<stem>/captions.json`, gitignored.
+
+### It is an OCR step, not a describer
+
+`prompts/caption_v1.md` asks for the visible text verbatim and forbids describing the image.
+That is not a style preference. "A slide with a bar chart on a blue background" contains none of
+the words a question would be asked in, so a descriptive caption is unretrievable however good
+the embedder is — and a frame shows text, it does not show what the text means, so a caption
+that explains the slide has inferred. An inference stored next to a timestamp is
+indistinguishable from something the video actually said.
+
+Neither arm gets a JSON schema, which is the one place this pipeline deliberately breaks its own
+"constrain generation at the source" rule. The two providers do not offer the same
+structured-output guarantees, and the deliverable is a table in which the arm is supposed to be
+the only variable — constraining generation would put *how it was asked* into it. The one bit of
+structure needed is a sentinel, `NO_TEXT`, and `schemas/caption.py` refuses a caption whose
+`has_text` disagrees with its text, so a sentinel the model stops emitting fails loudly instead
+of quietly reporting 100% yield.
+
+### Nothing here is indexed
+
+`caption.index` ships **`false`**, `src/index.py` is untouched, and no caption reaches the `vrag`
+collection. VRAG-023's acceptance criterion is "2-arm cost table hosted vs local; **the gate is
+untouched**", and an unindexed caption is how the second half stays true: a caption in the
+collection would move recall@5 and the Phase 2 abstention rates, which are recorded numbers
+scored once.
+
+Turning it on is a separate task that needs its own gate, tuned on `evals/dev/` only. The lever
+exists, unread, so the decision is written down where the switch would go.
 
 ## Where the time went: `make latency`
 
