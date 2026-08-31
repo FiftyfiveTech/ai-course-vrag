@@ -65,7 +65,7 @@ from pathlib import Path
 # "query.request: Field required" — a route that is wrong in a way no reading of the handler
 # shows. fastapi is a declared dependency (pyproject.toml), so importing it here is a
 # promise, not an assumption.
-from fastapi import Body, FastAPI, Request
+from fastapi import Body, FastAPI, Query, Request
 from fastapi import Path as PathParam
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
@@ -75,6 +75,8 @@ from schemas.api import (
     AskRequest,
     AskResponse,
     CitationOut,
+    GraphFinding,
+    GraphHealth,
     Health,
     IndexStatus,
     Problem,
@@ -95,6 +97,9 @@ from src.ask import (
 )
 from src.config import Config, ConfigError
 from src.config import load as load_config
+from src.graph import PASS as GRAPH_PASS
+from src.graph import Finding as GraphCheckFinding
+from src.graph import summarise as graph_summarise
 from src.index import local_file
 from src.mention import MentionError, catalogue
 from src.mention import _numeric as _mention_numeric
@@ -429,6 +434,36 @@ them, so a client that tries to override one is told so.
 """
 
 
+def public_graph_findings(findings: list[GraphCheckFinding]) -> list[GraphFinding]:
+    """`src.graph` findings, with the credential lines reduced to present/absent.
+
+    The CLI prints `len=36 sha256:ab12cd34` per credential, which is the right thing on an
+    operator's own terminal: it is how two machines confirm they hold the *same* secret
+    without either one displaying it.
+
+    Over HTTP it is the wrong thing, and not because the digest is reversible — it is eight
+    hex characters of sha256 over a high-entropy secret. It is that `api.host` is a lever
+    (config.toml), the endpoint takes no authentication, and a byte derived from a secret has
+    no business crossing a socket to earn nothing: the caller's actual question is whether
+    the value is set, and "set" answers it completely. Everything else in the table —
+    section, name, status, and the hint on a failure — passes through unchanged.
+    """
+    out: list[GraphFinding] = []
+    for finding in findings:
+        detail = finding.detail
+        if finding.section == "credentials" and finding.status == GRAPH_PASS:
+            detail = "set"
+        out.append(
+            GraphFinding(
+                section=finding.section,
+                name=finding.name,
+                status=finding.status,
+                detail=detail,
+            )
+        )
+    return out
+
+
 def create_app(cfg: Config | None = None):
     """Build the ASGI app. A factory, not a module-level `app`, for two reasons.
 
@@ -518,6 +553,63 @@ def create_app(cfg: Config | None = None):
             answer_model=effective_model(cfg),
             embed_model=str(cfg.get("embed.model")),
             media_served=bool(cfg.get("api.serve_media")),
+            config=cfg.fingerprint()["path"],
+            config_sha256=cfg.fingerprint()["sha256"],
+        )
+
+    @app.get("/graph/health", response_model=GraphHealth, tags=["status"])
+    def graph_health(
+        request: Request,
+        probe: bool = Query(
+            default=False,
+            description=(
+                "acquire a token from Microsoft and read its roles claim. Default false, so "
+                "this endpoint is offline and side-effect-free unless asked: it reports what "
+                "is configured. true makes one real request per call, and Entra throttles "
+                "token requests per app — do not poll it."
+            ),
+        ),
+    ) -> GraphHealth:
+        """Can this deployment read a Teams meeting's own transcript, and if not, what to ask for.
+
+        Separate from `/health` because Graph is not a dependency of answering a question.
+        It is a second producer of transcript text — the only one that knows *who* was
+        speaking, which is what minutes need and what whisper cannot supply. A deployment
+        with no tenant access serves `/ask` perfectly well, so `ready` false is a
+        configuration state reported at 200 and never a 503.
+
+        No `user` or `meeting` parameter, and that is a decision rather than an omission.
+        The CLI has both and they are how the one question that matters gets answered — does
+        Teams hand this tenant attributed text — but the answer is a list of colleagues'
+        names and object ids. That belongs on the operator's terminal, not in the response
+        body of an unauthenticated endpoint:
+
+            uv run python -m src.graph --user <organiser upn> --meeting '<join url>'
+        """
+        cfg = request.app.state.cfg
+        try:
+            summary = graph_summarise(cfg, probe=probe)
+        except ConfigError as exc:
+            # A checkout whose config.toml predates the [graph] section. 503 and not 500:
+            # nothing is broken, a lever is absent, and the fix is naming which one.
+            raise ApiError(
+                503,
+                f"the Graph levers are not in this config: {exc}",
+                hint="add the [graph] section to config.toml — see the copy in this repo",
+            ) from exc
+        return GraphHealth(
+            ready=summary.ready,
+            detail=summary.detail,
+            configured=summary.configured,
+            missing=list(summary.missing),
+            probed=summary.probed,
+            endpoint=f"{cfg.get('graph.base_url')}/{cfg.get('graph.api_version')}",
+            authority=str(cfg.get("graph.authority")),
+            tenant_id=summary.tenant_id,
+            required_roles=list(summary.required_roles),
+            granted_roles=list(summary.granted_roles),
+            missing_roles=list(summary.missing_roles),
+            findings=public_graph_findings(list(summary.findings)),
             config=cfg.fingerprint()["path"],
             config_sha256=cfg.fingerprint()["sha256"],
         )

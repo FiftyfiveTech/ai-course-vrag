@@ -612,3 +612,72 @@ cors_origins = ["http://localhost:3000", "http://127.0.0.1:3000", "http://localh
 # laptop: a citation still carries source_url, which opens the original upload at the same
 # second and is the only copy this project may point at.
 serve_media = true
+
+[graph]
+# Microsoft Graph — read by src/graph.py. THE POINT of this section: for a meeting held in
+# our own tenant, Teams has already transcribed it AND already knows who was speaking. It
+# writes `<v Priya Nair>` voice tags into the VTT. Whisper over an audio file cannot recover
+# a name from the audio, and diarisation gives anonymous clusters ("Speaker 1"), so this is
+# the only free source of attributed text this project has.
+#
+# It is narrow on purpose. Graph can read a meeting only inside a tenant that consented, so
+# a client's meeting in a client's tenant is out of reach here no matter what is granted.
+# Nothing in the pipeline imports this yet — there is no `[capture] arm` and `transcribe()`
+# still has one producer. This section is the levers for the check command.
+#
+# Credentials are NOT here. GRAPH_TENANT_ID / GRAPH_CLIENT_ID / GRAPH_CLIENT_SECRET are
+# names in .env.example and values in ~/.config/ai-course-vrag.env (CLAUDE.md).
+
+# Where tokens are minted. Its own lever because sovereign clouds are different hosts, not
+# a different path: 21Vianet is login.partner.microsoftonline.cn and US Gov is .us.
+authority = "https://login.microsoftonline.com"
+
+# Where the resource lives. Moves with the authority — a token from one cloud is not
+# accepted by another, so these two are changed together or not at all.
+base_url = "https://graph.microsoft.com"
+
+# "v1.0" or "beta". v1.0 and staying there: beta carries no compatibility promise and this
+# repo's discipline is that a recorded number stays reproducible. Everything the graph arm
+# needs — onlineMeetings, transcripts, /content — is GA on v1.0.
+api_version = "v1.0"
+
+# The client-credentials flow takes the "/.default" scope and nothing else: it means "every
+# application permission an admin has already consented to for this app". Per-permission
+# scopes are for user sign-in flows and are rejected here (AADSTS1002012).
+scope = "https://graph.microsoft.com/.default"
+
+timeout_s = 30.0
+
+# Reuse a cached token while it has at least this long to live. Not an optimisation: Graph
+# throttles token requests per app, so re-authenticating per request turns one meeting's
+# handful of reads into a rate-limit incident that reads like an outage. 300s also covers
+# clock skew between this machine and the authority.
+token_leeway_s = 300.0
+
+# Stop after this many pages of a collection. A cap rather than `while nextLink`: a
+# paginator that misreads nextLink requests page one forever, and unbounded that is a silent
+# hang against somebody's tenant instead of an error with a number in it.
+max_pages = 20
+
+# The application permissions the graph arm cannot work without. Checked against the
+# `roles` claim of the token itself, which is how "did IT actually grant it" gets a yes/no
+# without making a call and guessing at a 403 — a 403 has two causes (a missing role, or a
+# missing Teams application access policy) and the claim separates them.
+#
+# This is the list to hand a tenant administrator. Both are Application permissions, both
+# need admin consent, and NEITHER is sufficient alone: app-only meeting access also needs
+# `New-CsApplicationAccessPolicy` granting this app rights over the organiser. See the
+# Forbidden hint in src/graph.py.
+required_roles = [
+    "OnlineMeetingTranscript.Read.All",
+    "OnlineMeetings.Read.All",
+]
+
+# Wanted, not needed. `User.Read.All` resolves an email address to the object id a meeting
+# hangs off — without it the check still runs, with the organiser's UPN passed straight
+# through. `Calendars.Read` is meeting *discovery*, which is a later task: knowing a meeting
+# happened is a different problem from reading the one you were given.
+optional_roles = [
+    "User.Read.All",
+    "Calendars.Read",
+]
