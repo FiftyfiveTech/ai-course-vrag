@@ -492,7 +492,7 @@ def test_graph_error_prefers_inner_error_code():
         "https://graph.microsoft.test/v1.0/x",
     )
     assert error.code == "SpeakerAttributionNotAllowed"
-    assert "whisper already gives us for free" in error.hint
+    assert "EnableAttributedTranscripts" in error.hint
 
 
 def test_graph_error_403_hint_names_the_second_grant():
@@ -598,7 +598,7 @@ def test_find_online_meeting_doubles_a_quote_in_the_odata_filter(tmp_path, creds
     """OData escapes a single quote by doubling it. Not doing so breaks the filter."""
     calls = fake_http(lambda r: token_body() if r.method == "POST" else {"value": [{"id": "m1"}]})
     client = client_for(tmp_path, creds)
-    client.find_online_meeting("user-1", "https://teams.test/l/it's-a-url")
+    client.find_online_meeting("11111111-2222-3333-4444-555555555555", "https://teams.test/l/it's-a-url")
     get = next(c for c in calls if c.method == "GET")
     assert "it''s-a-url" in urllib.parse.unquote(get.full_url)
 
@@ -606,7 +606,9 @@ def test_find_online_meeting_doubles_a_quote_in_the_odata_filter(tmp_path, creds
 def test_find_online_meeting_with_no_match_says_which_two_things_to_check(tmp_path, creds, fake_http):
     fake_http(lambda r: token_body() if r.method == "POST" else {"value": []})
     with pytest.raises(GraphError) as exc:
-        client_for(tmp_path, creds).find_online_meeting("user-1", "https://teams.test/x")
+        client_for(tmp_path, creds).find_online_meeting(
+            "11111111-2222-3333-4444-555555555555", "https://teams.test/x"
+        )
     assert exc.value.code == "NotFound"
     assert "organiser" in str(exc.value)
 
@@ -1056,3 +1058,72 @@ def test_graph_health_does_not_affect_the_answering_health_check(tmp_path, no_en
     # /health needs the answer levers, which this config does not carry; what matters is
     # that /graph/health being unready never turns into a 5xx on the ask path.
     assert TestClient(app).get("/graph/health").status_code == 200
+
+
+# --------------------------------------------------------------------------------------
+# What the tenant actually said on 2026-08-31. Both of these are regression tests for a
+# diagnosis that took four probes to reach, and the thing worth protecting is that the
+# error text names the switch an administrator has to flip.
+
+
+def test_find_online_meeting_refuses_a_upn_before_spending_a_request(tmp_path, creds, fake_http):
+    """The one /users/{id} route that will not take a UPN.
+
+    Graph answers 400 "The userId in request URL is not a valid GUID", which says neither
+    which of a person's two ids it means nor where to find the other one. Caught here so the
+    message can, and caught BEFORE the call so a wrong id costs nothing.
+    """
+    calls = fake_http(lambda r: token_body())
+    with pytest.raises(GraphError) as exc:
+        client_for(tmp_path, creds).find_online_meeting(
+            "amy@contoso.test", "https://teams.test/x"
+        )
+    assert exc.value.code == "NotAGuid"
+    assert "Object ID" in str(exc.value)
+    # No GET was made: the guard runs before the request, not on its error.
+    assert not [c for c in calls if c.method == "GET"]
+
+
+def test_tenant_transcript_switch_hint_names_both_settings():
+    """The 403 that is not a permission problem.
+
+    Graph transcript access is a tenant control, off by default, enforced since 29 July 2026,
+    and it sits above the app role - so a fully-consented app still 403s. There are two
+    switches and only the second one is about names, which is why the hint has to name both:
+    enabling access alone yields valid, readable, UNATTRIBUTED VTT.
+    """
+    error = _graph_error(
+        http_error(
+            403,
+            {
+                "error": {
+                    "code": "Forbidden",
+                    "message": "Graph API access to transcripts is disabled for this tenant.",
+                    "innerError": {"code": "GraphAccessToTranscriptsDisabled"},
+                }
+            },
+        ),
+        "https://graph.microsoft.test/v1.0/x",
+    )
+    assert error.code == "GraphAccessToTranscriptsDisabled"
+    assert "EnableGraphTranscriptAccess" in error.hint
+    assert "EnableAttributedTranscripts" in error.hint
+    assert "Set-CsTeamsMeetingConfiguration" in error.hint
+
+
+def test_get_all_transcripts_uses_a_function_parameter_and_repeats_the_id(tmp_path, creds, fake_http):
+    """Two shapes Graph rejects, both measured.
+
+    `?meetingOrganizerUserId=` is a 400, "expected as a function parameter". Two different
+    ids is a 400, "The userId must match organizerId". So the organiser id goes in the path
+    AND in parentheses, and it is the same value in both.
+    """
+    calls = fake_http(
+        lambda r: token_body() if r.method == "POST" else {"value": [{"id": "t1"}]}
+    )
+    client_for(tmp_path, creds).list_organiser_transcripts("11111111-2222-3333-4444-555555555555")
+    url = urllib.parse.unquote(next(c for c in calls if c.method == "GET").full_url)
+    assert "getAllTranscripts(meetingOrganizerUserId='11111111-2222-3333-4444-555555555555')" in url
+    assert "users/11111111-2222-3333-4444-555555555555/onlineMeetings/getAllTranscripts" in url
+    assert "?meetingOrganizerUserId" not in url
+
