@@ -649,6 +649,19 @@ def _token_error(exc: urllib.error.HTTPError) -> GraphError:
     )
 
 
+# Graph does not agree with itself about the casing of `innerError.code`: the onlineMeetings
+# route answers `forbidden` and the recordings route answers `Forbidden` for the same 403 with
+# the same cause (measured 2026-08-31). An exact-match lookup therefore dropped the hint on
+# precisely the error whose remedy is hardest to guess - the application access policy - so
+# the lookup is folded rather than keyed literally.
+_GRAPH_HINTS_FOLDED = {key.casefold(): value for key, value in GRAPH_HINTS.items()}
+
+
+def _hint_for(code: str) -> str:
+    """The hint for a Graph error code, matched without regard to case."""
+    return _GRAPH_HINTS_FOLDED.get(code.strip().casefold(), "")
+
+
 def _graph_error(exc: urllib.error.HTTPError, url: str) -> GraphError:
     """Turn a Graph HTTPError into a GraphError carrying `error.code`.
 
@@ -663,7 +676,7 @@ def _graph_error(exc: urllib.error.HTTPError, url: str) -> GraphError:
     inner = inner if isinstance(inner, dict) else {}
     code = str(inner.get("code") or payload.get("code") or "")
     message = str(payload.get("message") or "").splitlines()
-    hint = GRAPH_HINTS.get(code) or GRAPH_HINTS.get(str(payload.get("code") or "")) or ""
+    hint = _hint_for(code) or _hint_for(str(payload.get("code") or ""))
     return GraphError(
         f"GET {url} returned {exc.code} ({code or 'no code'})"
         + (f": {message[0]}" if message else ""),
@@ -996,6 +1009,42 @@ def check(
     #
     # getAllTranscripts is what makes it cheap - it needs an organiser id and no meeting id,
     # so the switch is knowable before anyone hunts down a join url.
+    # The Teams application access policy, which is a DIFFERENT grant from the app role and
+    # from the tenant transcript switch. Without it the meeting object itself is unreadable:
+    #
+    #   403 forbidden - No application access policy found for this app <client id> on the user
+    #
+    # Probed with a joinWebUrl that belongs to nobody, which is what makes it cheap and
+    # side-effect free: no policy is a 403 naming the app, a policy in place is an empty 200,
+    # because a url nobody owns matches nothing. Only meaningful for a GUID - the route
+    # refuses a UPN before it evaluates any policy.
+    if user and _GUID.fullmatch(user.strip()):
+        try:
+            client.find_online_meeting(user, "https://teams.microsoft.com/l/meetup-join/vrag-probe")
+            findings.append(
+                Finding("tenant", "application access policy", PASS, "in place for this user")
+            )
+        except GraphError as exc:
+            if exc.code == "NotFound":
+                findings.append(
+                    Finding(
+                        "tenant",
+                        "application access policy",
+                        PASS,
+                        "in place - the probe url matched nothing, which is the point",
+                    )
+                )
+            elif exc.status == 403:
+                findings.append(
+                    Finding("tenant", "application access policy", FAIL, str(exc))
+                )
+                if exc.hint:
+                    findings.append(Finding("tenant", "fix", WARN, exc.hint))
+            else:
+                findings.append(
+                    Finding("tenant", "application access policy", WARN, f"inconclusive - {exc}")
+                )
+
     if user:
         try:
             found = client.list_organiser_transcripts(user)

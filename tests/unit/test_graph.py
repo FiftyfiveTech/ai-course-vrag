@@ -1126,4 +1126,58 @@ def test_get_all_transcripts_uses_a_function_parameter_and_repeats_the_id(tmp_pa
     assert "getAllTranscripts(meetingOrganizerUserId='11111111-2222-3333-4444-555555555555')" in url
     assert "users/11111111-2222-3333-4444-555555555555/onlineMeetings/getAllTranscripts" in url
     assert "?meetingOrganizerUserId" not in url
+def test_graph_hint_lookup_is_case_insensitive():
+    """Graph disagrees with itself about the casing of innerError.code.
 
+    Measured 2026-08-31: the onlineMeetings route answers `forbidden` and the recordings
+    route answers `Forbidden`, same 403, same cause - no application access policy. An
+    exact-match lookup dropped the hint on the one error whose remedy nobody guesses, so the
+    table is folded. This asserts the fold, not the wording.
+    """
+    from src.graph import GRAPH_HINTS, _hint_for
+
+    for code in GRAPH_HINTS:
+        assert _hint_for(code)
+        assert _hint_for(code.lower()) == GRAPH_HINTS[code]
+        assert _hint_for(code.upper()) == GRAPH_HINTS[code]
+    assert _hint_for("  forbidden  ") == GRAPH_HINTS["Forbidden"]
+    assert _hint_for("NoSuchCodeAnywhere") == ""
+
+
+def test_the_two_403s_are_different_blockers_with_different_fixes():
+    """A missing access policy and a disabled tenant switch are not the same problem.
+
+    Both are 403s on the same app with the same roles granted, and they need two different
+    administrators to do two different things. Conflating them costs a round trip to IT, so
+    each hint has to name its own cmdlet and neither may name the other's.
+    """
+    policy = _graph_error(
+        http_error(
+            403,
+            {
+                "error": {
+                    "code": "Forbidden",
+                    "message": "No application access policy found for this app.",
+                    "innerError": {"code": "forbidden"},
+                }
+            },
+        ),
+        "https://graph.microsoft.test/v1.0/x",
+    )
+    switch = _graph_error(
+        http_error(
+            403,
+            {
+                "error": {
+                    "code": "Forbidden",
+                    "message": "Graph API access to transcripts is disabled for this tenant.",
+                    "innerError": {"code": "GraphAccessToTranscriptsDisabled"},
+                }
+            },
+        ),
+        "https://graph.microsoft.test/v1.0/x",
+    )
+    assert "New-CsApplicationAccessPolicy" in policy.hint
+    assert "Set-CsTeamsMeetingConfiguration" not in policy.hint
+    assert "Set-CsTeamsMeetingConfiguration" in switch.hint
+    assert "New-CsApplicationAccessPolicy" not in switch.hint
