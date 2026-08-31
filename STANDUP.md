@@ -798,6 +798,84 @@ Blocked:  nothing. Three findings that are somebody's decision, not mine:
 Next:     VRAG-022 (MVP demo run + numbers into docs/learning/retros.md) — it wants numbers with
           the commands that produced them, and docs/learning/ now exists for it.
 
+## 2026-08-28 — Ritika (Evaluator)
+Did:      Two things, and a pivot behind both: the track is moving to a **Teams meeting
+          notetaker**, so the roadmap is now `docs/plan-teams-notetaker.md` — three tiers
+          ordered by what is actually unblocked (containerize / build / integrate), with Tier 3
+          blocked on an M365 tenant nobody has yet.
+          **Containerized the repo.** `Dockerfile` (toolbox image: it runs the pipeline, the
+          gates *and* the API, because a supervisor re-runs a gate command and an image that
+          only served /ask could not be handed to one), `compose.yaml` (`app` + `ollama` +
+          one-shot `ollama-init`), `.dockerignore`, `docker/ollama-init.sh`, seven `docker-*`
+          targets, `uv.lock` committed. Ollama is a *service* because src/embed.py and
+          src/retrieve.py call `ollama.embed` and there is no hosted embedding arm — nothing
+          retrieves without a daemon. One code change to make `make doctor` honest as the
+          container HEALTHCHECK: the ollama *binary* is absent when the daemon is a sibling
+          service, and FAILing on that made the check red on a container that works.
+          **Made the overview build actually work.** It had been producing a document whose
+          `people` held "Baroque period", "Victorian England" and "Rome", every span crammed
+          into the last 300 s of a 1805 s video. That was not the prompt — it had run on the 3B
+          local model. The cause is a **413 that the code could not tell from a 429**: Groq
+          reports both capacity failures under `rate_limit_exceeded`, so a string match read a
+          permanent condition as throttling and fell back. `_GroqRequestTooLargeError` is now a
+          separate class, classification switches on HTTP status, and a 413 never falls back
+          whatever `answer.fallback` says.
+          No real transcript fits one call on this tier, so `build` now folds: windows the
+          transcript, summarises each, merges. `people` and `topics` are merged **in code, never
+          by a model** — every span has to come off a real chunk and concatenation cannot invent
+          one. Only the abstract needs synthesis, and it is given no timestamps at all.
+Number:   `uv run pytest tests/unit -q` → **671 passed, 1 skipped** (was 645; +26)
+          `make leakage-check` → PASS, overlap 0
+          `uv run pytest tests/gates/gate_phase0.py tests/gates/gate_phase1.py -q` → 17 passed
+          `uv run pytest tests/gates/gate_phase2a.py -q -s` → 10 passed. Re-run *deliberately*,
+            because `answer.reasoning_effort` is a global lever and that gate scores the
+            extractive path. Unmoved: schema-valid 1.0000 (15/15), abstentions 3/3, abstention
+            rate 0.1667 on 12 answerable against a 0.25 ceiling, 10 citations all grounded,
+            ground() repaired 0/15, openai/gpt-oss-120b, $0.0000.
+          `make overview VIDEO=611 OVERVIEW_FLAGS=--refresh` → 6 windows, 3m16s, gpt-oss-120b
+            people 24  evidence not an exact chunk range: 0
+            topics 72  start not a real chunk start, or end past 1804.8s: 0
+          The three levers that got it there, each found by a failed run rather than estimated:
+            overview.max_context_chars  180000 -> 10000  180000 measured the model's *context
+              window*; the binding limit is the tier's *throughput*. Measured 3.531 chars/token
+              on transcript (not the 4.0 that holds for prose) and 2528 chars of fixed overhead.
+            overview.window_max_tokens  new, 4000  the cap is charged whether used or not; at
+              2500 the reply was cut off before `topics` and strict mode rejected all of it.
+            answer.reasoning_effort     new, "low"  gpt-oss reasoning tokens are charged against
+              the completion cap. The window that failed finished in 1539 tokens at "low".
+          The raw provider response, because it is the whole finding:
+            413 "Request too large ... tokens per minute (TPM): Limit 8000, Requested 17152"
+            x-ratelimit-remaining-tokens: 8000   <- a FULL bucket, nothing was throttling it
+            x-should-retry: false                <- the provider's own verdict
+          `docker compose config` → exit 0.
+Blocked:  **The image has never been built.** Docker Desktop's daemon is not running on this
+          machine (`npipe:////./pipe/dockerDesktopLinuxEngine` not found), so
+          `make docker-build && make docker-up && make docker-doctor` is unrun. `docker compose
+          config` passing is all that can be claimed, and it is the first thing a reviewer
+          should try.
+          Three things left undone rather than done badly, all on PR #30:
+          (1) `config.deploy.toml`. src/config.py reads one file and refuses defaults, so a
+          deploy config is either a 900-line copy that drifts or a small overlay needing
+          `load(path, overlay=)`. Only needed for a *public* host — local compose already binds
+          0.0.0.0 through the existing `HOST` override.
+          (2) **There is no gate on the overview.** Its quality is argued from one run someone
+          eyeballed, which is exactly what this repo says not to do. `evals/overview/` and
+          `tests/gates/gate_overview.py` are item 10 of plan-whole-video-questions.md and still
+          open, along with items 4, 7, 8 and 9.
+          (3) The overview is **half-wired**: `make overview` builds a good document and
+          `answer()` has an overview branch, but there is no `--mode` flag on any CLI and no
+          `mode` field on `AskRequest` — which is `extra="forbid"`, so sending one over HTTP is
+          rejected rather than ignored. Reachable only from Python today. Verified it does work
+          there: `answer("@611 what is this video about?", cfg, meter, mode=OVERVIEW)` answers
+          on gpt-oss-120b without abstaining and cites `video 611 0.0s-27.5s`.
+          Also: **no notetaker cards exist on the board**, and CLAUDE.md makes the board the
+          source of truth for what to do next. And the PRD contradicts the pivot twice —
+          docs/VRAG-Video-Rag.md §2 puts real-time ingest out of v1 scope and forbids
+          client-recorded sessions, and a client recording is already on disk.
+          Same identity mismatch as every session: git authors as vimal, so PR #30 is his name.
+Next:     Wire the overview end to end (items 4, 7, 8, 9) and then gate it (item 10) — an
+          ungated feature is not done here — before extending Overview into minutes.
+
 ## 2026-08-31 — Ritika (Builder)
 Did:      VRAG-023 (stretch) — keyframe captions on slide-heavy segments, cost measured. New:
           `src/keyframes.py` (selection, pure), `src/caption.py` (two arms + CLI),
