@@ -128,12 +128,21 @@ def dev_videos(manifest: Path = MANIFEST) -> list[dict]:
 def local_file(video_id: str, samples: Path = SAMPLES) -> Path | None:
     """The already-fetched file for a corpus id, if there is one.
 
-    `make sample-real` writes `<video_id>_<youtube_id>.<ext>` and yt-dlp picks the
-    extension, so the id is a prefix match rather than a known filename.
+    Two layouts, because two things put files here. `make sample-real` writes
+    `<video_id>_<youtube_id>.<ext>` and yt-dlp picks the extension, so a corpus id is a
+    prefix match rather than a known filename. A video ingested locally has no youtube id
+    to append and lands as `<video_id>.<ext>` — `bob-video.mp4`. Matching only the first
+    layout is what made an ingested video answerable but unplayable: it indexes and cites
+    fine, then `media_url` finds no file, `stream_url` comes back null, and the frontend
+    draws "no playable copy" over a video sitting right there in samples/.
+
+    The separator stays explicit in both globs. A bare `f"{video_id}*"` would let `61`
+    match `611_H8fGd3fCJbg.mp4` and serve one video under another's id.
     """
     if not samples.is_dir():
         return None
-    hits = sorted(p for p in samples.glob(f"{video_id}_*") if p.is_file())
+    found = (*samples.glob(f"{video_id}_*"), *samples.glob(f"{video_id}.*"))
+    hits = sorted(p for p in found if p.is_file())
     return hits[0] if hits else None
 
 

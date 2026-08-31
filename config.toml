@@ -200,14 +200,29 @@ split_search_s = 5.0
 #   25.0     8.0     6       29.0 s     0
 #   22.0     8.0     7       24.4 s     0
 #
-# 25.0 is the widest setting that keeps every chunk on dev citable. Re-sweep it when the ASR
-# arm changes — the bound depends on how long that arm's segments run.
+# 25.0 is the widest setting that keeps every chunk on *video 181* citable. VRAG-018 swept all
+# four dev videos and that generalisation does not survive: 611's longest whisper segment is
+# 29.98 s, not 181's 4.16 s, so the bound here is 25 + 2 x 29.98 = 85 s and 120 of the 346 dev
+# chunks are longer than the 30 s tolerance — the longest is 53.8 s, and it is the same chunk at
+# every window from 12 s up because its length comes from its segments, not from the grid.
+#
+# It costs no recall on evals/dev (recall@5 = 0.9167 at every window from 12 s to 45 s), so this
+# value stands. What does not stand is the reasoning: re-sweep when the ASR arm changes, because
+# the bound depends on that arm's segment lengths, and a window narrower than 25.0 will not fix
+# a long chunk. docs/learning/primer-chunking-embeddings.md §4 has the working.
 window_s = 25.0
 
 # How much of each window the next one repeats. A sentence straddling a boundary then lands
-# whole in at least one chunk. The cost is duplicated text — measured at 1.74× the transcript
-# on dev video 181 at these settings — so embedding spend scales with this number. That trade
-# is the subject of VRAG-018; this is the lever to sweep.
+# whole in at least one chunk. The cost is duplicated text — 1.79x the transcript across all
+# four dev videos at these settings — so embedding spend scales with this number.
+#
+# VRAG-018 swept it. Two results worth having here. Overlap = 0 is not duplication = 1.0: it
+# measures 1.22x, because segments are never split and a segment straddling a boundary is placed
+# in both windows even when the windows do not overlap. And the whole visible recall benefit of
+# overlap on evals/dev is one pair (d003, which at overlap 0 misses by 35.0 s against a 30 s
+# tolerance); 2.0 already recovers it, and 8.0 recovers nothing further that 2.0 had not.
+# 8.0 is kept because Phase 1 was graded on it, not because the sweep argues for it over 2.0 —
+# on 12 pairs those two settings are tied. docs/learning/primer-chunking-embeddings.md §5.
 overlap_s = 8.0
 
 [answer]
@@ -266,6 +281,43 @@ model = "openai/gpt-oss-120b"
 # automatically. Must be pulled first: ollama pull hf.co/bartowski/Llama-3.2-3B-Instruct-GGUF:Q4_K_M
 ollama_model = "bartowski/Llama-3.2-3B-Instruct-GGUF:Q4_K_M"
 
+# Whether a Groq 429 may be answered by the local model instead of failing.
+#
+# true is right on a laptop: the free tier throttles, the bucket refills, and finishing the
+# run on the 3B model beats stopping — as long as you can see it happened. `used` on the
+# AnswerRun and the `provenance` block both report the model that actually answered, and the
+# fallback prints a WARNING to stderr.
+#
+# false is right for anything whose output is a recorded number: a gate, a sweep, a deployed
+# container. gpt-oss-120b and the 3B local model do not score the same (README: 15/15 vs
+# 12/15 schema-valid on dev), so a silent substitution attributes one model's number to the
+# other. config.deploy.toml sets this false for exactly that reason.
+#
+# This lever only governs 429. A **413** — the request being larger than the tier's whole
+# per-minute budget — never falls back regardless, because there is nothing transient to
+# ride out and the smaller model would answer a question the configured one refused to be
+# asked. That distinction was measured: an overview build for video 611 asked for 17152
+# tokens against a TPM limit of 8000 with a full bucket and `x-should-retry: false`, and the
+# old code read it as throttling and quietly ran every build on the 3B model. See
+# src/answer.py:_GroqRequestTooLargeError.
+fallback = true
+
+# How hard gpt-oss thinks before it answers: "low", "medium", "high", or "" to send nothing.
+#
+# Not a universal parameter — the gpt-oss family takes it and a model that does not would 400
+# on it — so the empty string means "omit", not "use the provider default".
+#
+# "low" because reasoning tokens are charged against max_completion_tokens, and on this tier
+# that cap is most of the per-minute budget. Measured on the fold window that broke first: at
+# the default effort the model produced a good abstract and six people and was then cut off
+# before `topics`, so strict mode rejected the whole reply for a missing property. The same
+# window at "low" finished in 1539 completion tokens against the same 4000 cap.
+#
+# It is a quality lever as well as a cost one. Raise it if a measured number says to — the
+# extraction here is "copy what the transcript says", which is not the kind of task that
+# rewards long deliberation, and no number has yet said otherwise.
+reasoning_effort = "low"
+
 # The prompt, versioned on disk. Never inlined in code (README, prompts/). A prompt change
 # that moves a number goes in answer_v2.md next to the measurement, so the prompt that
 # produced a recorded result stays readable.
@@ -299,6 +351,103 @@ temperature = 0.0
 # that clips those returns a truncated object that fails validation — which would show up as
 # "the model cannot follow the schema" when the real cause is the cap.
 max_tokens = 1200
+
+[overview]
+# WHOLE-VIDEO QUESTIONS. Read by src/overview.py and by the overview branch of src/answer.py.
+#
+# "What is this video about?" and "who is taking part?" have no answer in any one 25-second
+# chunk, so the extractive path declines them — correctly, under answer_v1.md rules 2 and 3,
+# which are the rules that make the abstention selective on d013-d015. The synthesis happens
+# here instead: once per video, at index time, over the whole transcript, into
+# runs/<stem>/overview.json. A question asked in overview mode is answered from that document
+# rather than from the transcript, which is why the per-question call stays small.
+#
+# The arm, the model, the temperature and the ollama fallback are all [answer]'s — one set of
+# levers for one model, so a run's numbers stay attributable to one config fingerprint.
+
+# The two prompts, versioned on disk like every other one. The first builds the document at
+# index time; the second answers a question out of it.
+prompt = "prompts/overview_v1.md"
+answer_prompt = "prompts/overview_answer_v1.md"
+
+# The reduce step of the fold: per-window abstracts in, one abstract of the whole video out.
+# Only reached when a transcript needs more than one window, which on this tier is every real
+# video. It is given no timestamps, so it cannot corrupt a span — `people` and `topics` are
+# merged in code for exactly that reason (src/overview.py:_merge).
+merge_prompt = "prompts/overview_merge_v1.md"
+
+# Completion cap for a whole-video build — the single-window case, and the reduce step's
+# ceiling. Higher than answer.max_tokens (1200) because the document is an abstract plus
+# every person named plus one topic per stretch of the video — for the 56-minute meeting that
+# is ~20 topic entries — and gpt-oss emits reasoning tokens before the JSON. A cap that clips
+# them returns a truncated object that fails validation, which reads as "the model cannot
+# follow the schema" when the cause is the cap.
+max_tokens = 4000
+
+# Completion cap for one window of the fold, which is a different and much smaller job: a
+# quarter of a video yields a short abstract, a handful of names and a few topics. Separate
+# from max_tokens above because the cap is charged against the per-minute budget whether it
+# is used or not — reserving a whole-video 4000 for a quarter-video answer is what pushed the
+# first folded run to 8315 tokens against a limit of 8000.
+window_max_tokens = 4000
+
+# Ceiling on the rendered transcript handed to the build call, in characters. Measured with
+# src.overview.render_transcript over the indexed corpus:
+#
+#   vector7-21aug-client-meeting   321 chunks   100 726 chars   (56 min)
+#   bob-video                      200 chunks    97 967 chars   (57 min)
+#   611_H8fGd3fCJbg                107 chunks    50 325 chars   (25 min)
+#
+# Roughly twice the raw transcript, because chunks overlap by [chunk] overlap_s = 8 s of a
+# 25 s window and the overlap is rendered rather than merged away — the model sees exactly
+# the spans a citation is allowed to name.
+#
+# THIS WAS 180 000, AND THAT NUMBER MEASURED THE WRONG CONSTRAINT.
+#
+# ~100 000 characters is ~25 k tokens, which is indeed comfortably inside
+# openai/gpt-oss-120b's *context window*. But the context window is not what binds here. The
+# free `on_demand` tier meters **tokens per minute**, and it counts the prompt plus
+# max_completion_tokens against that budget before the call runs. Measured, building 611:
+#
+#   413  "Request too large ... on tokens per minute (TPM): Limit 8000, Requested 17152"
+#   x-ratelimit-remaining-tokens: 8000      <- a full bucket; nothing was throttling it
+#   x-should-retry: false
+#
+# So the arithmetic that matters is the budget, not the window:
+#
+#   prompt_tokens + max_tokens <= 8000
+#   8000 - 4000 (max_tokens above) - ~600 (the system prompt, 2 370 chars) = ~3 400 tokens
+#   ~3 400 tokens x ~4.0 chars/token = ~13 600 characters
+#
+# The 4.0 chars/token ratio is measured on this content, not assumed: 52 853 characters of
+# system + user came back priced at 13 152 prompt tokens.
+#
+# The two inputs were then measured rather than estimated, because the first folded run still
+# came back 413 at "Requested 8315":
+#
+#   chars per token   3.531   (52 853 + 15 238 chars priced at 13 152 + 4 315 prompt tokens)
+#   fixed overhead    2 528 chars   the overview system prompt plus the user template
+#
+# Transcript tokenises worse than prose — the `t_start=482.1` headers are digits and symbols,
+# not words — so the 4.0 chars/token that holds for English is wrong here by 12 %.
+#
+#   (context + 2528) / 3.531 + window_max_tokens <= 8000
+#   (10000  + 2528) / 3.531 + 4000               =  7548     <- 452 tokens of margin
+#
+# window_max_tokens was 2500 first, which bought 5 000 more characters of context per window
+# and then failed differently: 400 `json_validate_failed` with `failed_generation: ''`. An
+# empty generation is the cap being spent entirely on gpt-oss's reasoning tokens before the
+# JSON begins — the exact failure the comment on max_tokens above describes, arriving at the
+# window scale. Reasoning is charged whether or not it is shown, so the completion cap is not
+# compressible below what the model thinks with, and the context is what has to give.
+#
+# Every video in the corpus is far over one window — the smallest is 611 at 50 325 — which is
+# the honest finding rather than a reason to raise the number: **no real transcript fits one
+# call on this tier.** src.overview.build therefore folds the transcript into windows of this
+# size and merges the partials, and this ceiling is what sizes a window. It is no longer a
+# "raise it if the video is long" lever; raising it past the TPM budget only moves the
+# failure from a fast local check to a 413 from the provider.
+max_context_chars = 10000
 
 [ask]
 # THE DEMO — VRAG-020. Read by src/ask.py.

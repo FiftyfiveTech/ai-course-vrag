@@ -1,0 +1,95 @@
+# The pipeline as two services.
+#
+#   docker compose up -d
+#   docker compose exec app make doctor
+#   docker compose exec app make gate
+#
+# Why ollama is a service and not something in the app image: src/embed.py and
+# src/retrieve.py both call `ollama.embed`, and there is no hosted embedding arm anywhere in
+# this repo. Nothing retrieves without a reachable daemon, so it is a hard dependency of the
+# system rather than a convenience of local development. Splitting it also means the model
+# store is a volume with one owner, pulled once, instead of a copy per image build.
+#
+# The app needs no code change to find it. The python `ollama` client and
+# src/doctor.py:_ollama_host both read OLLAMA_HOST, which the Dockerfile sets to this
+# service's name on the compose network.
+
+services:
+  ollama:
+    image: ollama/ollama:0.5.4
+    volumes:
+      - ollama-models:/root/.ollama
+    # Not published. The daemon is reachable from `app` over the compose network and from
+    # nowhere else: it is an unauthenticated API that will run any model it holds, and the
+    # host does not need it. Add a ports: entry only if you want to talk to it from the
+    # laptop, and know that is what you are doing.
+    expose:
+      - "11434"
+    healthcheck:
+      # `ollama list` exits non-zero until the daemon is actually serving, which is what
+      # `depends_on: service_healthy` needs to gate on. Curl is not in this image.
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+
+  # One-shot. Pulls the embedding model into the shared volume and exits; `app` waits for it
+  # to complete rather than for it to stay up.
+  ollama-init:
+    image: ollama/ollama:0.5.4
+    depends_on:
+      ollama:
+        condition: service_healthy
+    volumes:
+      - ollama-models:/root/.ollama
+      - ./docker/ollama-init.sh:/ollama-init.sh:ro
+      # Read-only, so the init script can check the tag it pulls against the [embed] lever
+      # rather than holding a second copy of it that drifts.
+      - ./config.toml:/app/config.toml:ro
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    entrypoint: ["/bin/sh", "/ollama-init.sh"]
+    restart: "no"
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      ollama-init:
+        condition: service_completed_successfully
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+      # Secrets are passed through from the host environment, never baked into the image and
+      # never read from a committed file (CLAUDE.md: secrets live in ~/.config/). The empty
+      # default keeps compose from refusing to start when one is unset — src/doctor.py is
+      # what reports a missing credential, and it says which one and where it looked.
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      HF_TOKEN: ${HF_TOKEN:-}
+      NVIDIA_API_KEY: ${NVIDIA_API_KEY:-}
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      # Media in, never into the image. `samples/` is bound to the host directory rather
+      # than a named volume so that `make sample-real` output on the laptop is the same file
+      # the container ingests, and so the licence question — which media exists, and where —
+      # stays answerable by looking at one directory you own.
+      - ./samples:/app/samples
+      # Ingest output, telemetry sessions and the ask/ demo pages. Bound rather than named
+      # because `make latency` reads runs/telemetry/*.jsonl after the process is gone, and
+      # reading it from the host beats exec-ing into a container to find out where the wall
+      # clock went.
+      - ./runs:/app/runs
+      # The vector store. A named volume: it is a build artefact rebuilt by `make index-dev`,
+      # but an expensive one, and it holds transcript text derived from corpus media — which
+      # is the same reason .gitignore keeps ./chroma out of the repo.
+      - chroma-data:/app/chroma
+    restart: unless-stopped
+
+volumes:
+  ollama-models:
+  chroma-data:

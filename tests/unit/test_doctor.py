@@ -6,7 +6,15 @@ project actually ships, and a secret never reaches a terminal.
 
 import io
 
-from src.doctor import FAIL, PASS, WARN, Check, check_credential, report
+from src.doctor import (
+    FAIL,
+    PASS,
+    WARN,
+    Check,
+    check_credential,
+    check_ollama_binary,
+    report,
+)
 from src.env import fingerprint, load_env, parse_env_file
 
 SECRET = "gsk_thisIsNotARealKeyJustAFixture"
@@ -86,3 +94,37 @@ def test_report_exits_zero_when_only_passes_and_warns():
     )
     assert code == 0
     assert "1 PASS  1 WARN  0 FAIL" in out.getvalue()
+
+
+# --------------------------------------------------------------------------- ollama split
+#
+# The binary and the daemon are two different claims. The container stack (compose.yaml)
+# puts them in different places on purpose: ollama runs as its own service, so the app image
+# ships no CLI. A FAIL there would make `make doctor` red on a container that works, and the
+# Dockerfile uses `make doctor` as its HEALTHCHECK.
+
+
+def _daemon(status: str) -> Check:
+    return Check("services", "ollama daemon", status, "http://ollama:11434 - 1 model(s)")
+
+
+def test_missing_ollama_cli_is_a_warn_when_the_daemon_answers(monkeypatch):
+    """The app container: no CLI, reachable daemon. Querying works, so this is not a FAIL."""
+    monkeypatch.setattr("src.doctor.shutil.which", lambda name: None)
+    check = check_ollama_binary(_daemon(PASS))
+    assert check.status == WARN
+    assert "daemon is up" in check.detail
+    assert "ollama pull" in check.detail  # says where the CLI would still be needed
+
+
+def test_missing_ollama_cli_is_still_a_fail_when_the_daemon_is_down(monkeypatch):
+    """Nothing embeds without a daemon, and with no CLI there is no way to start one."""
+    monkeypatch.setattr("src.doctor.shutil.which", lambda name: None)
+    assert check_ollama_binary(_daemon(FAIL)).status == FAIL
+
+
+def test_present_ollama_cli_passes_regardless_of_the_daemon(monkeypatch):
+    """A laptop mid-`ollama serve`: the binary check reports on the binary, nothing else."""
+    monkeypatch.setattr("src.doctor.shutil.which", lambda name: "/usr/bin/ollama")
+    monkeypatch.setattr("src.doctor._run", lambda cmd: "ollama version is 0.5.4")
+    assert check_ollama_binary(_daemon(FAIL)).status == PASS

@@ -729,3 +729,71 @@ Blocked:  nothing. Three flagged:
           so start/note/request_review on 1783 post under his name and not mine.
 Next:     VRAG-018 (concept primer + coach page) is the last Backlog card of mine that is not
           the retro. Phase 0 has no open cards left after this one.
+
+## 2026-08-27 — Ritika (Evaluator) — VRAG-018
+Did:      VRAG-018 — concept primer + coach page. Measured the two chunking levers instead of
+          writing prose about them, which turned out to matter: the sweep falsified a claim
+          this repo has been carrying since VRAG-014.
+          `tools/sweep_chunking.py` — a 12-point cross through chunk.window_s x chunk.overlap_s
+          (window walked at the shipped overlap, overlap walked at the shipped window), scored
+          recall@1/@3/@5 by the QA_SPEC §2 rule, with chunk count, duplication factor, longest
+          chunk, chunks over the ±30 s tolerance, embed wall-time and store size per point. It
+          re-chunks from the cached runs/<video>/transcript.json, so 12 points make zero ASR
+          calls; it never writes config.toml and never touches ./chroma (each point gets its own
+          store under runs/sweep/), because Phase 1 was graded at 25.0/8.0 and a sweep that
+          edited the levers in place would re-tune a passed gate.
+          `docs/learning/primer-chunking-embeddings.md` — the prose, and
+          `docs/learning/coach.html` (built by `tools/build_coach.py`, `make coach`) — the same
+          numbers with the levers movable. Standalone HTML, no server, no fetch: the sweep JSON
+          is inlined at build time because a file:// page cannot fetch its own data directory.
+          `tests/unit/test_primer_numbers.py` — parses the tables back out of the primer and
+          asserts every cell against the sweep JSON. Not decoration: the first draft had five
+          hand-rounded word counts in it (17,700 against a real 17,249; 46,900 against 47,397),
+          and the check found them. Mutation-tested — four deliberate wrong digits, four
+          failures naming the row.
+Number:   `uv run python tools/sweep_chunking.py`  ->  12 points in 1334.9s, $0.0000
+            window cut (overlap 8.0): recall@5 = 0.9167 at 12, 15, 20, 25, 30 and 45 s —
+              six settings, one number — and 0.8333 at 60 s. Chunks 1300 -> 114, store
+              9.8 -> 1.9 MB, embed 199.8 -> 69.9 s across that range.
+            overlap cut (window 25.0): 0.8333 at overlap 0, 0.9167 at 2, 5, 8, 12 and 16.
+              Duplication 1.22x -> 3.34x, store 2.2 -> 5.2 MB.
+            The sweep reproduces the gate's 346 chunks and 0.9167 at the shipped setting down
+            a separate code path, which is why the other 11 rows are worth reading.
+          `uv run pytest tests/unit -q`  ->  645 passed, 1 skipped
+            (ffmpeg exported onto PATH first — the 1 skip is the Windows-symlink test in
+            test_api.py, not an ffmpeg skip)
+          `uv run pytest tests/gates/gate_phase0.py gate_phase1.py gate_phase2a.py
+            test_no_leakage.py -q`  ->  51 passed  (GROQ_API_KEY is present this session, so
+            the Phase 2 gates ran on the arm they pin — unlike the VRAG-009 session)
+          `make leakage-check`  ->  PASS, overlap 0
+Blocked:  nothing. Three findings that are somebody's decision, not mine:
+          (1) **The `window_s` ceiling derivation in the README and config.toml is wrong.** It
+          reads "25.0 is the widest setting that keeps every chunk on dev citable", measured on
+          video 181 alone (longest whisper segment 4.16 s). Video 611's longest segment is
+          29.98 s, so the bound is 25 + 2 x 29.98 = 85 s, and at the shipped setting **120 of
+          346 dev chunks are longer than 30 s, the longest 53.8 s** — the same chunk at every
+          window from 12 s up, because its length comes from its segments and not from the
+          grid. The formula was right; the input was one video. It cost no recall on dev (a long
+          chunk is only uncitable for references in its last 23.8 s), so 25.0 stands. Both
+          comments corrected in place with the measurement and a pointer to the primer.
+          (2) **`make gate-phase1` on this working copy now prints 0.8333, not the 0.9167 in the
+          README** — and no lever moved. ./chroma holds 867 chunks: the 346 corpus ones plus
+          `bob-video` (200) and `vector7-21aug-client-meeting` (321), neither in the manifest.
+          Scored against the same index filtered to the four corpus videos it is 0.9167 again;
+          the 521 extra chunks simply take top-5 slots and d003 loses its place. Still passes
+          (threshold 0.80). I have **not** run `--reset` — dropping two videos someone else
+          indexed is not my call. `make sources` lists them. Written up as §6 of the primer,
+          because "recall@k is a property of the whole index" is the most useful thing this card
+          found and it generalises past this repo.
+          (3) `make index-dev INDEX_FLAGS=--reset` was documented nowhere but also did not work
+          — the target hardcoded its command and swallowed the variable. Wired up; `make -n`
+          confirms the flag now reaches src.index, which does have --reset.
+          Also: **NotebookLM sync is not done.** The card's acceptance is "primer + page
+          committed; NotebookLM synced" and there is no NotebookLM anything in this repo — no
+          notebook id, no credential in .env.example, no prior card that synced one. It is a
+          manual upload someone has to do from an authenticated browser session; the two files
+          are committed and ready for it. Flagged on the card rather than marked done.
+          Same identity mismatch as every session: the board MCP authenticates as vimal, so
+          start/note/request_review on 1792 post under his name and not mine.
+Next:     VRAG-022 (MVP demo run + numbers into docs/learning/retros.md) — it wants numbers with
+          the commands that produced them, and docs/learning/ now exists for it.

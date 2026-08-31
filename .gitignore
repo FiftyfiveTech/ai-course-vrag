@@ -3,7 +3,6 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .env
-uv.lock
 runs/
 *.wav
 *.mp4
@@ -27,3 +26,9 @@ chroma/
 # VRAG API: the OpenAPI document is generated (`make openapi > openapi.json`) from
 # schemas/api.py, so committing it would give a frontend two contracts to disagree about.
 openapi.json
+
+# uv.lock is deliberately NOT ignored — it was until the container work, and a lockfile that
+# is not in the repo pins nothing for anybody else. The Dockerfile installs with
+# `uv sync --frozen`, which is the whole reason to have a lock: the image gets exactly the
+# resolution that was tested, and a stale or missing lock fails the build loudly instead of
+# resolving something new inside a build nobody watches. Run `git add uv.lock` once.

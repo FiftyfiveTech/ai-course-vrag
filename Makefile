@@ -1,4 +1,4 @@
-.PHONY: sources setup doctor corpus corpus-check corpus-pointers heldout-check leakage-check sample sample-real sample-broken test gate gate-phase1 gate-phase2a demo chunks index index-dev probe answer answer-dev ask api openapi latency clean
+.PHONY: overview sources setup doctor corpus corpus-check corpus-pointers heldout-check leakage-check sample sample-real sample-broken test gate gate-phase1 gate-phase2a demo chunks index index-dev probe answer answer-dev ask api openapi latency sweep sweep-dry coach clean docker-build docker-up docker-down docker-doctor docker-test docker-gate docker-shell
 .DEFAULT_GOAL := help
 
 # The video the demo ingests, and the file the levers are read from. Both overridable:
@@ -35,6 +35,12 @@ API_FLAGS ?=
 SESSION ?=
 LATENCY_FLAGS ?=
 
+# Extra flags for `make index` / `make index-dev` — most often --reset.
+INDEX_FLAGS ?=
+
+# Extra flags for `make overview` — most often --refresh, which rebuilds a stored one.
+OVERVIEW_FLAGS ?=
+
 help:
 	@echo "make setup   create the venv and install deps (uv)"
 	@echo "make doctor  check every dependency and credential; non-zero on FAIL"
@@ -61,7 +67,19 @@ help:
 	@echo "make api     the same answer over HTTP, for a frontend to call; /docs for the schema"
 	@echo "make openapi print the OpenAPI document and exit; no server, no network"
 	@echo "make latency which phase ate the wall clock last session; LATENCY_FLAGS=--list for older"
+	@echo "make overview VIDEO=<file|id>  build the whole-video document the overview mode answers from"
 	@echo "make sources which videos an @tag can name; scope a question with make ask Q=\"@611 ...\""
+	@echo "make sweep    re-measure the chunking sweep behind the VRAG-018 primer (~22 min, zero spend)"
+	@echo "make sweep-dry  the same grid, chunk counts only - no embedding, seconds"
+	@echo "make coach   open the coach page: the sweep as a chart you can move the levers on"
+	@echo ""
+	@echo "containers (compose.yaml: app + ollama; see the Dockerfile for what is in the image)"
+	@echo "make docker-build   build the toolbox image"
+	@echo "make docker-up      start ollama, pull the F16 embedding model, start the api"
+	@echo "make docker-doctor  the same env check, inside the container; non-zero on FAIL"
+	@echo "make docker-test    unit tests inside the container"
+	@echo "make docker-gate    every phase gate inside the container — the reproducible run"
+	@echo "make docker-down    stop everything"
 
 setup:
 	@command -v uv >/dev/null || { echo "uv not installed: curl -LsSf https://astral.sh/uv/install.sh | sh"; exit 1; }
@@ -154,8 +172,11 @@ index: $(VIDEO)
 # (`make corpus`) cannot leave this pointing at videos that are no longer dev. Fetches any
 # video that is not already in samples/ (pointers, not copies — PROVENANCE) and refuses
 # held-out ids outright.
+# INDEX_FLAGS is how --reset gets through. It matters after a chunk lever moves: chunk ids
+# carry the timestamps, so the old rows survive a re-index as orphans and the store ends up
+# holding two generations that score better than either (VRAG-018 §7, and see `sources`).
 index-dev:
-	uv run python -m src.index --dev --config $(CONFIG)
+	uv run python -m src.index --dev --config $(CONFIG) $(INDEX_FLAGS)
 
 # Unlabelled questions in, hits out, no number. The gate says how often the right moment is
 # in the top 5; it cannot say that the right passage keeps landing at rank 4, or that a
@@ -195,6 +216,23 @@ gate-phase2a: leakage-check
 # tests/gates/README says no gate result counts until dev and held-out are known disjoint.
 gate-phase1: leakage-check
 	uv run pytest tests/gates/gate_phase1.py -v -s
+
+# What a whole video IS, as opposed to what it says at one moment. Built once, at index
+# time, into runs/<stem>/overview.json, and answered against by `mode: "overview"`.
+#
+# Reads the chunks back out of Chroma, so the video has to be indexed first (`make index`).
+#
+# It FOLDS, and that is not an optimisation. No real transcript fits one call on Groq's free
+# tier: the tier meters tokens per minute, the limit is 8000, and video 611 in one pass asked
+# for 17152. So the transcript is cut into windows of overview.max_context_chars, each is
+# summarised on its own, and the partials are merged — people and topics in code, so no span
+# can be invented, and one small call for the abstract. Expect a few minutes and one line of
+# progress per window on stderr; 611 is 6 windows in ~3 min.
+#
+#   make overview VIDEO=samples/bob-video.mp4
+#   make overview VIDEO=611 OVERVIEW_FLAGS=--refresh
+overview:
+	uv run python -m src.overview "$(VIDEO)" --config $(CONFIG) $(OVERVIEW_FLAGS)
 
 # THE DEMO - VRAG-020. Question in, answer out, and a static HTML page under runs/ask/
 # whose citations seek a player to the second they came from. No server, no build step:
@@ -256,6 +294,82 @@ latency:
 # echo of the command line would be the first thing in the file and not valid JSON.
 openapi:
 	@uv run python -m src.api --config $(CONFIG) --print-openapi
+
+# The measurements behind the VRAG-018 primer: recall@5, chunk shape and index size across a
+# 12-point grid of chunk.window_s x chunk.overlap_s. Writes docs/learning/data/chunking_sweep.json,
+# which docs/learning/coach.html reads and docs/learning/primer-chunking-embeddings.md quotes.
+#
+# Reads config.toml and never writes it, and never touches ./chroma - each grid point gets its
+# own store under runs/sweep/. That is deliberate: Phase 1 was graded at window_s = 25.0 /
+# overlap_s = 8.0, and a sweep that edited the levers in place would re-tune a passed gate.
+#
+# Needs the cached transcripts (`make index-dev` once) and Ollama. No ASR call and no hosted
+# call: ~20 min of local embedding, $0.00.
+sweep:
+	uv run python tools/sweep_chunking.py $(SWEEP_FLAGS)
+
+# The same grid with the embedding and the scoring skipped - chunk counts, durations and the
+# duplication factor only. Seconds, no Ollama, no store written. Use it to see what a lever
+# does to the index before paying 20 minutes to find out what it does to recall.
+sweep-dry:
+	uv run python tools/sweep_chunking.py --dry-run --out runs/sweep/dry.json
+
+# The coach page - VRAG-018. The sweep as two charts and a lever you can move, plus the four
+# checks to run before blaming the chunker. Standalone HTML with the numbers inlined at build
+# time by tools/build_coach.py, so it opens off the filesystem with no server and no fetch.
+coach: docs/learning/coach.html
+	@echo "open docs/learning/coach.html"
+
+docs/learning/coach.html: tools/build_coach.py docs/learning/data/chunking_sweep.json
+	uv run python tools/build_coach.py
+
+# ----------------------------------------------------------------------------- containers
+#
+# The image is a toolbox, not a server: it runs the pipeline, the gates and the API, because
+# this repo's discipline is that a supervisor re-runs a gate command and compares output
+# (CLAUDE.md). An image that could only serve /ask could not be handed to one.
+#
+# Two services (compose.yaml): `app`, and `ollama` with its model volume. Ollama is not
+# optional — src/embed.py and src/retrieve.py call `ollama.embed` and there is no hosted
+# embedding arm, so nothing retrieves without it.
+#
+# Secrets are read from your shell, never from a committed file. Export them first, or put
+# them in ~/.config/ai-course-vrag.env and source it:
+#   export GROQ_API_KEY=... HF_TOKEN=... NVIDIA_API_KEY=...
+
+COMPOSE ?= docker compose
+
+docker-build:
+	$(COMPOSE) build
+
+# Brings up ollama, waits for it to be healthy, pulls the F16 embedding model into its
+# volume, then starts the app. The first run is slow — ~274 MB of weights — and every run
+# after it is not, because the volume persists.
+docker-up:
+	$(COMPOSE) up -d
+	@echo "api on http://127.0.0.1:8000  —  next: make docker-doctor"
+
+docker-down:
+	$(COMPOSE) down
+
+# Same check the Dockerfile uses as its HEALTHCHECK: ffmpeg, ffprobe, the daemon over
+# OLLAMA_HOST, the embedding model's tag, every credential. Non-zero if a required one fails.
+# Run this before believing anything else in this section.
+docker-doctor:
+	$(COMPOSE) exec app make doctor
+
+docker-test:
+	$(COMPOSE) exec app make test
+
+# The point of containerising at all: a gate run that does not depend on what is installed
+# on the machine that runs it. Needs GROQ_API_KEY in the environment `make docker-up` saw —
+# gate_phase2a makes 15 hosted calls and a gate that cannot run is a FAIL, not a skip.
+docker-gate:
+	$(COMPOSE) exec app make gate
+
+# A shell in the app container, for when a target above is not the question.
+docker-shell:
+	$(COMPOSE) exec app bash
 
 clean:
 	rm -rf .venv .pytest_cache **/__pycache__ .devids

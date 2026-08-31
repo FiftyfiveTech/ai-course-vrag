@@ -230,8 +230,12 @@ def test_grounding_leaves_an_abstention_untouched():
 _ARMS = (
     '[answer]\narm = "{arm}"\nmodel = "openai/gpt-oss-120b"\n'
     'ollama_model = "bartowski/Llama-3.2-3B-Instruct-GGUF:Q4_K_M"\n'
-    'prompt = "p"\ntemperature = 0.0\nmax_tokens = 10\n'
+    'prompt = "p"\ntemperature = 0.0\nmax_tokens = 10\nfallback = true\n'
+    'reasoning_effort = ""\n'
 )
+# The same config with the 429 fallback off - what a gate or a deployed container runs
+# with, because a silent substitution attributes one model's number to another.
+_ARMS_NO_FALLBACK = _ARMS.replace("fallback = true", "fallback = false")
 _LOCAL = "bartowski/Llama-3.2-3B-Instruct-GGUF:Q4_K_M"
 
 
@@ -249,7 +253,9 @@ def test_the_local_arm_reports_the_model_that_actually_answered(tmp_path, monkey
     cfg = cfg_from(_ARMS.format(arm="ollama"), tmp_path)
     seen = {}
 
-    def fake_ollama(system, user, model, temperature, max_tokens, meter):
+    # `schema` arrived with the overview work: _ask passes the shape it wants generation
+    # constrained to, so both the Answer and the Overview contracts go through one door.
+    def fake_ollama(system, user, model, temperature, max_tokens, meter, schema=None):
         seen["model"] = model
         return "{}", 3
 
@@ -592,3 +598,105 @@ def test_the_report_says_nothing_about_scope_when_there_was_none(tagged):
     out = io.StringIO()
     mod.report(run, out)
     assert "scope:" not in out.getvalue()
+
+
+# --------------------------------------------------------------- 413 is not 429
+#
+# Groq reports both capacity failures with code `rate_limit_exceeded`, and the old string
+# match on "rate_limit" treated them alike. The cost was specific and silent: every overview
+# build ran on the 3B local model, and its output was read as a prompt that did not work.
+#
+# The real response, free `on_demand` tier, building an overview for video 611:
+#   413  "Request too large ... on tokens per minute (TPM): Limit 8000, Requested 17152"
+#   x-ratelimit-remaining-tokens: 8000     (a FULL bucket - nothing was throttling it)
+#   x-should-retry: false                  (the provider's own verdict)
+
+
+class _FakeStatusError(Exception):
+    """Stands in for groq.APIStatusError, which carries the status as an attribute."""
+
+    def __init__(self, status_code: int, message: str):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+_TOO_LARGE = (
+    "Error code: 413 - {'error': {'message': 'Request too large for model "
+    "`openai/gpt-oss-120b` ... on tokens per minute (TPM): Limit 8000, Requested 17152', "
+    "'type': 'tokens', 'code': 'rate_limit_exceeded'}}"
+)
+_THROTTLED = (
+    "Error code: 429 - {'error': {'message': 'Rate limit reached', "
+    "'code': 'rate_limit_exceeded'}}"
+)
+
+
+def test_a_413_is_classified_as_too_large_not_as_throttling():
+    """Both carry code `rate_limit_exceeded`; only the status separates them."""
+    err = mod._classify_groq_error(_FakeStatusError(413, _TOO_LARGE), "openai/gpt-oss-120b")
+    assert isinstance(err, mod._GroqRequestTooLargeError)
+    assert not isinstance(err, mod._GroqRateLimitError), "413 must not be retried as a 429"
+
+
+def test_a_429_is_still_a_rate_limit():
+    err = mod._classify_groq_error(_FakeStatusError(429, _THROTTLED), "openai/gpt-oss-120b")
+    assert isinstance(err, mod._GroqRateLimitError)
+
+
+def test_any_other_status_is_a_plain_answer_error():
+    err = mod._classify_groq_error(_FakeStatusError(500, "boom"), "m")
+    assert type(err) is AnswerError
+
+
+def test_too_large_never_falls_back_even_with_fallback_enabled(tmp_path, monkeypatch):
+    """The whole point. The local arm would answer, and that answer would be recorded as
+    this run's — which is how a 3B model's output was read as an overview prompt failure."""
+    cfg = cfg_from(_ARMS.format(arm="groq"), tmp_path)  # fallback = true
+
+    def boom(*a, **k):
+        raise mod._GroqRequestTooLargeError("groq request too large (m): 413 ...")
+
+    called = []
+    monkeypatch.setattr(mod, "_groq_arm", boom)
+    monkeypatch.setattr(mod, "_ollama_arm", lambda *a, **k: (called.append(1), ("{}", 3))[1])
+    with pytest.raises(mod._GroqRequestTooLargeError):
+        mod._ask("s", "u", cfg, Meter())
+    assert called == [], "fell back to the local arm on a request that can never fit"
+
+
+def test_the_message_says_it_is_not_throttling_and_what_to_do():
+    """A 413 that reads as 'rate limit' sends the reader off to wait for a bucket that is
+    already full. The message has to say so and name the levers that change it."""
+    err = mod._classify_groq_error(_FakeStatusError(413, _TOO_LARGE), "openai/gpt-oss-120b")
+    text = str(err)
+    assert "not throttling" in text
+    assert "overview.max_context_chars" in text
+
+
+def test_fallback_false_re_raises_the_rate_limit_instead_of_substituting(tmp_path, monkeypatch):
+    """What a gate or a container runs with: finishing on a different model would attribute
+    one model's number to the other."""
+    cfg = cfg_from(_ARMS_NO_FALLBACK.format(arm="groq"), tmp_path)
+
+    def boom(*a, **k):
+        raise mod._GroqRateLimitError("groq rate limit (openai/gpt-oss-120b): 429")
+
+    called = []
+    monkeypatch.setattr(mod, "_groq_arm", boom)
+    monkeypatch.setattr(mod, "_ollama_arm", lambda *a, **k: (called.append(1), ("{}", 3))[1])
+    with pytest.raises(mod._GroqRateLimitError):
+        mod._ask("s", "u", cfg, Meter())
+    assert called == []
+
+
+def test_fallback_true_still_substitutes_on_a_429(tmp_path, monkeypatch):
+    """The laptop case, unchanged: the bucket refills, so finishing beats stopping."""
+    cfg = cfg_from(_ARMS.format(arm="groq"), tmp_path)
+
+    def boom(*a, **k):
+        raise mod._GroqRateLimitError("groq rate limit (openai/gpt-oss-120b): 429")
+
+    monkeypatch.setattr(mod, "_groq_arm", boom)
+    monkeypatch.setattr(mod, "_ollama_arm", lambda *a, **k: ("{}", 3))
+    _, _, used = mod._ask("s", "u", cfg, Meter())
+    assert used == _LOCAL
