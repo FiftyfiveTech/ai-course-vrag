@@ -449,6 +449,129 @@ window_max_tokens = 4000
 # failure from a fast local check to a 413 from the provider.
 max_context_chars = 10000
 
+[caption]
+# KEYFRAME CAPTIONS — VRAG-023, the stretch task. Read by src/caption.py and src/keyframes.py.
+#
+# Why it exists: 5 of the 17 answerable held-out pairs turn on something on *screen* rather
+# than something said, and one of them is on a video with no speech at all (STANDUP, VRAG-012).
+# A transcript-only index cannot reach those however good retrieval gets.
+#
+# What it is NOT: a change to the index. See `index` at the bottom of this section — VRAG-023's
+# acceptance criterion is "2-arm cost table hosted vs local; **the gate is untouched**", and
+# nothing here reaches the Chroma collection the gates score.
+
+# THE cost lever, and it is a selection rule rather than a model choice. Ingest already sampled
+# the frames (ingest.frames.fps = 0.2 above); there are far more of them than anyone would pay
+# to caption — 1091 for the 91-minute client meeting, 3086 across the four dev videos.
+#
+# A slide is worth reading and it holds still. `select='gte(scene,0)',metadata=print` over the
+# already-extracted frames gives one "how different is this from the last one" score per
+# sample, and a stretch of low scores is something holding on screen. Measured on the indexed
+# corpus (`lavfi.scene_score`, frame 0's synthetic 0.0 dropped):
+#
+#   video                          n     median   frac < 0.02
+#   vector7-21aug-client-meeting   1090  0.0012   86.5%      <- screen share
+#   bob-video                       679  0.0220   45.2%
+#   701_-dfvdKf-KR0                 653  0.0987   14.2%
+#   611_H8fGd3fCJbg                 360  0.1481   14.4%      <- documentary
+#
+# Then collapsing each stretch to one keyframe, at the two settings below:
+#
+#   video                          calls          still runs cover
+#   vector7-21aug-client-meeting   1091 ->  64    90.6% of 5455 s
+#   bob-video                       680 ->  62    39.6%
+#   701_-dfvdKf-KR0                 654 ->  12     6.1%
+#   611_H8fGd3fCJbg                 361 ->   7     6.9%
+#
+# That coverage column is what makes "slide-heavy" measured rather than asserted: the same two
+# levers select almost the whole screen-share and almost none of the documentary, and neither
+# number came from watching a video.
+still_threshold = 0.02
+
+# Floor on how many frames a stretch must cover to be worth a call. Not a matter of taste —
+# it is the lever that does the discriminating, and dropping it stops the rule working. At
+# still_threshold = 0.02, min_run_frames = 2 takes the Bernini documentary from 7 selected
+# stretches to 41, because a documentary has plenty of two-frame coincidences and very few
+# slides. 3 is the lowest value that still separates the two classes of video:
+#
+#   threshold  min_run   meeting        611 (documentary)
+#   0.01       2          98 runs        26 runs
+#   0.01       3          83 runs         4 runs
+#   0.02       2          83 runs        41 runs
+#   0.02       3          64 runs         7 runs      <- these settings
+#   0.05       2          63 runs        65 runs      <- stops discriminating entirely
+#   0.05       3          48 runs        17 runs
+#
+# Note the 0.05/2 row: it selects *more* stretches from the documentary than from the screen
+# share. A threshold loose enough to catch every slide catches every slow pan as well.
+min_run_frames = 3
+
+# Hard ceiling on vision calls per video, so a long or badly-sampled video cannot quietly
+# spend a free tier. 120 is well above the 64 the worst real case selects, so it does not bind
+# today; when it does bind, src/caption.py says so on stderr and the recorded reduction still
+# describes the full selection rather than the truncated one.
+max_keyframes = 120
+
+# Which arm reads the frames:
+#
+#   arm = "nim"     hosted — NVIDIA NIM free tier (NVIDIA_API_KEY)
+#   arm = "ollama"  local  — no key, no network, no rate limit
+#
+# The hosted arm is not Groq, and that is measured rather than assumed. `client.models.list()`
+# on our key returns 14 models and not one of them takes an image — the same fact [answer]
+# above records from the other side ("Groq serves exactly two models with a real HF repo id and
+# a chat endpoint"). NIM is the provider src/doctor.py already calls "hosted fallback" and
+# already checks a credential for.
+#
+# Unlike [answer].fallback, a rate-limited hosted call here does NOT drop to the local model.
+# The whole deliverable is a table attributing latency and tokens to an arm, and a silent
+# substitution mid-run would put both arms' numbers in one row.
+arm = "nim"
+
+# Hosted model, by HF repo id. NIM's wire id for it is `meta/llama-3.2-11b-vision-instruct`,
+# which is a *different string* — the translation is in src.caption.NIM_WIRE_NAMES and it
+# raises on an unknown id rather than deriving one. Three models in this pipeline, three
+# different rules: whisper's Groq id drops the owner, nomic's needs a -GGUF suffix that only
+# exists on a converted repo, gpt-oss's happens to match. None of those was predictable.
+model = "meta-llama/Llama-3.2-11B-Vision-Instruct"
+
+# Local model, by HF repo id. Must be pulled first, with the tag:
+#   ollama pull hf.co/ggml-org/Qwen2.5-VL-3B-Instruct-GGUF:Q4_K_M
+#
+# Two things about that id. The repo carries an `mmproj-*.gguf` projector alongside the
+# weights, which was checked on the HF API before this line was written — without one, Ollama
+# loads a vision model that cannot see the image and captions every frame from the prompt
+# alone. And the tag is explicit for the reason [embed] documents at length: an untagged
+# `ollama pull hf.co/<repo>` takes the repo's smallest file, which was 2-bit weights and
+# halved recall@5 the one time it happened here.
+ollama_model = "ggml-org/Qwen2.5-VL-3B-Instruct-GGUF:Q4_K_M"
+
+# The prompt, versioned on disk like every other one. It is an OCR instruction, not a
+# describe-the-image one, and prompts/caption_v1.md explains why at length: "a slide with a bar
+# chart on a blue background" contains none of the words a question would be asked in, so a
+# descriptive caption is unretrievable however good the embedder is.
+prompt = "prompts/caption_v1.md"
+
+# Completion cap for one frame. A slide is a title and a few bullets; 512 is generous for that
+# and small enough that a model which ignores rule 4 and starts describing the room gets cut
+# off rather than billed for a paragraph.
+max_tokens = 512
+
+# Refuse to send a frame whose base64 is larger than this. NIM inlines an image only below its
+# own limit and wants an upload handle above it. Measured across the whole indexed corpus, this
+# does not currently bite: the largest frame on disk is 85 291 bytes = 113 721 base64, at
+# ingest.frames.width = 768 and jpeg_quality = 4. Raising either of those levers is what would
+# make it fire, and the fix then is a decision about those, not a silent downscale here.
+max_b64_bytes = 180000
+
+# Whether captions are embedded into the retrieval index. **false, and this is the line that
+# keeps VRAG-023's acceptance criterion true** — "the gate is untouched". A caption in the
+# `vrag` collection would move recall@5 and the Phase 2 abstention rates, which are recorded
+# numbers scored once. Turning this on is a separate task that needs its own gate, tuned on
+# evals/dev only. Nothing reads it yet; it exists so the decision is written down where the
+# lever would go rather than only in a commit message.
+index = false
+
 [ask]
 # THE DEMO — VRAG-020. Read by src/ask.py.
 #

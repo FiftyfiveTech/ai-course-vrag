@@ -797,3 +797,71 @@ Blocked:  nothing. Three findings that are somebody's decision, not mine:
           start/note/request_review on 1792 post under his name and not mine.
 Next:     VRAG-022 (MVP demo run + numbers into docs/learning/retros.md) — it wants numbers with
           the commands that produced them, and docs/learning/ now exists for it.
+
+## 2026-08-31 — Ritika (Builder)
+Did:      VRAG-023 (stretch) — keyframe captions on slide-heavy segments, cost measured. New:
+          `src/keyframes.py` (selection, pure), `src/caption.py` (two arms + CLI),
+          `schemas/caption.py`, `prompts/caption_v1.md`, `tools/caption_arms.py`, a `[caption]`
+          section in config.toml, `make captions` / `make caption-arms`, README section, and 51
+          unit tests. Nothing is indexed: `caption.index` ships false, `src/index.py` untouched.
+          The cost lever is the **selection**, not the model. Ingest already sampled the frames;
+          captioning all 1091 of the client meeting is 1091 vision calls whether or not they
+          were worth reading. A slide holds still, so one extra ffmpeg pass over the
+          already-extracted frames uses `select` as an instrument rather than a filter —
+          `gte(scene,0)` is always true, so every frame prints its own scene score.
+          Two things that had to be checked rather than assumed. Groq serves **no** vision model
+          on our key (`client.models.list()` → 14 models, none takes an image), so the hosted arm
+          is NVIDIA NIM, whose wire id `meta/llama-3.2-11b-vision-instruct` has a different
+          *owner* from the HF repo id — a lookup that raises on a miss, not a derivation. And the
+          local repo was picked because it carries an `mmproj-*.gguf` projector, checked on the
+          HF API first; without one Ollama loads a vision model that cannot see the image and
+          captions every frame from the prompt alone.
+Number:   `.venv/Scripts/python.exe tools/caption_arms.py vector7-21aug-client-meeting --limit 10`
+            1091 frames -> 64 still stretches (17.0x fewer vision calls), scored in 0.7s
+            still stretches cover 4940s of 5455s (90.6%)
+            arm     model (HF repo id)                        calls tokens tok/call s/call yield chars    $
+            hosted  meta-llama/Llama-3.2-11B-Vision-Instruct     10  37612   3761.2   9.42  100%  1087 0.00
+            local   ggml-org/Qwen2.5-VL-3B-Instruct-GGUF:Q4_K_M  10  15984   1598.4  19.58  100%   506 0.00
+            PROJECTED to all 64 stretches of a 91-minute video
+            hosted    64 calls  240716 tokens   603.0s   398.0 s/video-hour  $0.0000
+            local     64 calls  102297 tokens  1253.1s   827.0 s/video-hour  $0.0000
+          $0.00 on both rows is the true number — NIM free tier and a local model — and
+          src/telemetry.py carries both at rate 0.0 with **no invented paid rate**, so the cost
+          is spent in tokens and seconds instead. Hosted is ~2x faster per call and reads about
+          twice as much text; local spends 2.4x fewer tokens and needs no key.
+          Selection grid, same command per video: meeting 1091->64 (90.6% covered), bob-video
+          680->62 (39.6%), 701 654->12 (6.1%), 611 361->7 (6.9%). That coverage column is what
+          makes "slide-heavy" measured rather than asserted — the same two levers select almost
+          the whole screen-share and almost none of the documentary.
+          `.venv/Scripts/python.exe -m pytest tests/unit -q` → **722 passed, 1 skipped**
+          (was 671; +51 in test_keyframes.py and test_caption.py), ffmpeg on PATH.
+          `make gate` → **2 failed, 53 passed**. Recorded baseline is 1 failed / 54 passed.
+Blocked:  nothing, but the gate delta needs reading before anyone calls it a regression.
+          The pre-existing failure is `gate_phase2::test_score_at_least_70_percent` (7/20 = 0.35),
+          already red on a clean tree and documented in docs/plan-whole-video-questions.md — most
+          held-out pairs abstain because their videos are not indexed.
+          The second is `gate_phase2::test_no_pipeline_errors`, and it is **transient, not mine**:
+          q011 and q012 both came back `groq arm failed: Connection error.` on a run whose pytest
+          clock reads "2 days, 16:16:08" — the laptop slept mid-gate and the date rolled 08-28 to
+          08-31, which dropped those two connections. Isolated by re-running that gate alone:
+            `.venv/Scripts/python.exe -m pytest tests/gates/gate_phase2.py -q`
+            → 1 failed, 3 passed in 143.87s (0:02:23)
+          `test_no_pipeline_errors` passes on a stable connection (q011 OK), leaving only the
+          documented score failure. So `make gate` is 1 failed / 54 passed — the recorded
+          baseline — and VRAG-023's "the gate is untouched" holds.
+          The score itself moved 7/20 -> 8/20 between the two runs with nothing changed, which is
+          the temperature-0.0-is-not-reproducible effect already written up under `[answer]` in
+          config.toml. Worth knowing before anyone reads a one-point move as a result.
+          Structurally the change cannot reach that gate: `git diff --stat -- tests/gates/` is
+          empty, nothing imports src/caption.py or src/keyframes.py from a gate, the `vrag`
+          collection is unchanged at 908, and src/config.py has no section whitelist so a new
+          `[caption]` table is inert to every lever a gate reads.
+          Worth recording for anyone benchmarking a local model: the local arm measured
+          **87.65 s/call on its first run and 19.58 s/call on its second**, same code and same
+          frames. The first paid a cold load of 2.8 GB into RAM. A single-run local benchmark on
+          a freshly pulled model measures the disk, not the model.
+          Same identity mismatch as every session: the board MCP authenticates as vimal, so
+          start/note/request_review on 1797 post under his name, and 1797 is Vimal's card.
+Next:     nothing claimed. The follow-up this opens is indexing captions, which is a separate
+          card and needs its own gate on evals/dev only — `caption.index` is the lever, shipped
+          off, and turning it on would move recall@5 and the Phase 2 abstention rates.
