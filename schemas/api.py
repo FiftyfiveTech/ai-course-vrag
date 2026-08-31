@@ -249,3 +249,64 @@ class Problem(BaseModel):
 
     error: str
     hint: str | None = None
+
+
+class GraphFinding(BaseModel):
+    """One line of `GET /graph/health` — the same shape `src.graph.Finding` prints.
+
+    Carried over the wire rather than flattened to a boolean because the useful content is
+    *which* check failed and what to do about it. "graph: not ready" sends someone to read
+    Python; "roles / OnlineMeetingTranscript.Read.All / FAIL / not in the token" names the
+    thing to ask an administrator for.
+    """
+
+    section: str = Field(description="credentials | config | token | roles | reachability | transcript")
+    name: str
+    status: str = Field(description="PASS | WARN | FAIL | SKIP")
+    detail: str
+
+
+class GraphHealth(BaseModel):
+    """`GET /graph/health` — can this deployment read a Teams meeting's own transcript.
+
+    Distinct from `Health`, which answers "can this server answer a question". Graph is not a
+    dependency of that: it is a second producer of transcript text — the only one that knows
+    who was speaking — and a deployment with no tenant access serves `/ask` perfectly well.
+    So `ready` false here is a configuration state to report, never a 503.
+
+    **Deliberately narrower than the CLI's table.** `uv run python -m src.graph` prints a
+    `len=/sha256:` fingerprint per credential, which is right on an operator's own terminal.
+    This is an unauthenticated endpoint and `api.host` is a lever somebody can move off
+    loopback (see config.toml), so over HTTP the credentials are reported as present or
+    absent and nothing derived from their bytes is emitted. The access token is never
+    included in any form.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    ready: bool = Field(
+        description="a token was acquired and every graph.required_roles entry is granted"
+    )
+    detail: str = Field(description="what to do about it when ready is false")
+    configured: bool = Field(description="whether all three GRAPH_* names have values")
+    missing: list[str] = Field(
+        default_factory=list, description="which GRAPH_* names are unset"
+    )
+    probed: bool = Field(
+        description="whether anything was actually sent to Microsoft for this response"
+    )
+    endpoint: str = Field(description="the Graph base url and api version in use")
+    authority: str
+    tenant_id: str | None = Field(
+        default=None, description="the `tid` claim of the token; null when none was acquired"
+    )
+    required_roles: list[str] = Field(default_factory=list)
+    granted_roles: list[str] = Field(
+        default_factory=list, description="the token's `roles` claim — what admin consent gave"
+    )
+    missing_roles: list[str] = Field(
+        default_factory=list, description="required_roles the token does not carry"
+    )
+    findings: list[GraphFinding] = Field(default_factory=list)
+    config: str
+    config_sha256: str

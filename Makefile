@@ -1,4 +1,4 @@
-.PHONY: overview captions caption-arms sources setup doctor corpus corpus-check corpus-pointers heldout-check leakage-check sample sample-real sample-broken test gate gate-phase1 gate-phase2a demo chunks index index-dev probe answer answer-dev ask api openapi latency sweep sweep-dry coach clean docker-build docker-up docker-down docker-doctor docker-test docker-gate docker-shell
+.PHONY: overview captions caption-arms sources setup doctor corpus corpus-check corpus-pointers heldout-check leakage-check sample sample-real sample-broken test gate gate-phase1 gate-phase2a demo chunks index index-dev probe answer answer-dev ask api openapi latency graph-check sweep sweep-dry coach clean docker-build docker-up docker-down docker-doctor docker-test docker-gate docker-shell
 .DEFAULT_GOAL := help
 
 # The video the demo ingests, and the file the levers are read from. Both overridable:
@@ -44,6 +44,12 @@ OVERVIEW_FLAGS ?=
 # Extra flags for `make captions` — most often --arm ollama, or --limit N to cap vision calls.
 CAPTION_FLAGS ?=
 
+# Extra flags for `make graph-check`. The two that matter:
+#   --no-probe                                      report the config, send nothing to Microsoft
+#   --user <organiser upn> --meeting '<join url>'    fetch a real transcript and print its speakers
+#   --vtt <file>                                    parse a WebVTT file on disk; no credentials
+GRAPH_FLAGS ?=
+
 # Extra flags for `make caption-arms` — most often --limit N (0 for every selected stretch).
 ARMS_FLAGS ?=
 
@@ -73,6 +79,7 @@ help:
 	@echo "make api     the same answer over HTTP, for a frontend to call; /docs for the schema"
 	@echo "make openapi print the OpenAPI document and exit; no server, no network"
 	@echo "make latency which phase ate the wall clock last session; LATENCY_FLAGS=--list for older"
+	@echo "make graph-check  can we read a Teams meeting's own transcript; GRAPH_FLAGS=--no-probe"
 	@echo "make overview VIDEO=<file|id>  build the whole-video document the overview mode answers from"
 	@echo "make sources which videos an @tag can name; scope a question with make ask Q=\"@611 ...\""
 	@echo "make captions VIDEO=<file|id>  read the text off slide-heavy keyframes (VRAG-023)"
@@ -340,6 +347,33 @@ latency:
 # echo of the command line would be the first thing in the file and not valid JSON.
 openapi:
 	@uv run python -m src.api --config $(CONFIG) --print-openapi
+
+# Microsoft Graph, app-only — can this machine read a Teams meeting's own transcript?
+#
+# The reason to want that: Teams already transcribed its own meetings AND already knows who
+# was speaking. It writes `<v Priya Nair>` voice tags into the VTT. Whisper over an audio
+# file cannot recover a name from audio, and diarisation only ever yields anonymous clusters
+# ("Speaker 1"), so this is the only free source of ATTRIBUTED text in the project — which is
+# what minutes need, because minutes assign commitments to named people.
+#
+# Prints a doctor-style table, cheapest claim first, and exits non-zero on the first thing
+# that is actually wrong: credentials -> token -> roles -> reachability. The roles section
+# reads the token's own `roles` claim, which is how "did IT actually grant the permission"
+# gets a yes/no without making a call and guessing at a 403 — a 403 has two causes and only
+# one of them is a missing role (see src/graph.py GRAPH_HINTS).
+#
+# Needs GRAPH_TENANT_ID / GRAPH_CLIENT_ID / GRAPH_CLIENT_SECRET; `.env.example` lists the
+# names and `make doctor` reports them as optional WARNs, because no gate reads them. Zero
+# spend: Graph is covered by the tenant's own licences and nothing here is metered.
+#
+# The green table is NOT the answer. Whether Teams hands *this* tenant attributed text is a
+# per-tenant switch, and the only way to know is to read one real transcript:
+#
+#   make graph-check
+#   make graph-check GRAPH_FLAGS="--user amy@contoso.com --meeting 'https://teams.microsoft.com/l/meetup-join/...'"
+#   make graph-check GRAPH_FLAGS="--vtt samples/meeting.vtt"     # offline, no credentials
+graph-check:
+	uv run python -m src.graph --config $(CONFIG) $(GRAPH_FLAGS)
 
 # The measurements behind the VRAG-018 primer: recall@5, chunk shape and index size across a
 # 12-point grid of chunk.window_s x chunk.overlap_s. Writes docs/learning/data/chunking_sweep.json,

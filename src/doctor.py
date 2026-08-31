@@ -38,6 +38,18 @@ CREDENTIALS = (
 OPTIONAL_CREDENTIALS = (
     ("LANGFUSE_PUBLIC_KEY", "pk-", "tracing, not needed for the MVP gate"),
     ("LANGFUSE_SECRET_KEY", "sk-", "tracing, not needed for the MVP gate"),
+    # Microsoft Graph, app-only - src/graph.py. Optional and not required, because no gate
+    # and no pipeline phase reads them: the graph arm is a second producer of transcript
+    # text, not a dependency of the first. A missing one is a WARN so that a checkout with
+    # no tenant access still reports a ready environment.
+    #
+    # No prefix to assert: a tenant id and a client id are GUIDs and a client secret is
+    # opaque. "" matches everything, which is the honest version of "there is no shape to
+    # check here" - unlike gsk_ / nvapi-, where a wrong-shaped key is catchable now rather
+    # than at the first call. `uv run python -m src.graph` is the real check.
+    ("GRAPH_TENANT_ID", "", "Microsoft Graph app-only auth - src/graph.py"),
+    ("GRAPH_CLIENT_ID", "", "Microsoft Graph app-only auth - src/graph.py"),
+    ("GRAPH_CLIENT_SECRET", "", "Microsoft Graph app-only auth - src/graph.py"),
 )
 
 # Substring match - Ollama tags carry a registry prefix and a quant suffix.
