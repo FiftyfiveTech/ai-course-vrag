@@ -26,7 +26,8 @@ To reset: delete the chroma_path directory or change the collection name.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import json
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Sequence
 
@@ -54,6 +55,7 @@ class Chunk:
     t_start: float  # seconds from video start
     t_end: float
     text: str
+    speakers: list[str] = field(default_factory=list)  # VRAG-026: stored in metadata, never embedded
 
     def chunk_id(self) -> str:
         """Stable, unique id for this chunk within the Chroma collection."""
@@ -178,7 +180,8 @@ def _upsert(collection, chunks: list[Chunk], embeddings: list[list[float]]) -> N
         embeddings=embeddings,
         documents=[c.text for c in chunks],
         metadatas=[
-            {"video_id": c.video_id, "t_start": c.t_start, "t_end": c.t_end}
+            {"video_id": c.video_id, "t_start": c.t_start, "t_end": c.t_end,
+             "speakers": json.dumps(c.speakers)}
             for c in chunks
         ],
     )

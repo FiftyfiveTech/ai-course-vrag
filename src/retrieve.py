@@ -35,7 +35,7 @@ recall@5 definition (from QA_SPEC.md §2):
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Sequence
 
@@ -61,6 +61,7 @@ class RetrievedChunk:
     t_end: float
     text: str
     score: float  # cosine distance (lower = more similar)
+    speakers: tuple[str, ...] = ()  # VRAG-026: from Chroma metadata, empty when unattributed
 
 
 # ---------------------------------------------------------------------------
@@ -258,6 +259,11 @@ def _parse_query_results(results: dict) -> list[RetrievedChunk]:
 
     chunks = []
     for doc, meta, dist in zip(docs, metas, dists):
+        raw_speakers = meta.get("speakers", "[]")
+        try:
+            speakers = tuple(json.loads(raw_speakers))
+        except (ValueError, TypeError):
+            speakers = ()
         chunks.append(
             RetrievedChunk(
                 video_id=str(meta.get("video_id", "")),
@@ -265,6 +271,7 @@ def _parse_query_results(results: dict) -> list[RetrievedChunk]:
                 t_end=float(meta.get("t_end", 0.0)),
                 text=doc,
                 score=float(dist),
+                speakers=speakers,
             )
         )
     return chunks

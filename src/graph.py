@@ -751,7 +751,7 @@ def to_segments(cues: list[VttCue]) -> list[Any]:
     """
     from src.transcript import Segment
 
-    return [Segment(t_start=c.t_start, t_end=c.t_end, text=c.text) for c in cues]
+    return [Segment(t_start=c.t_start, t_end=c.t_end, text=c.text, speaker=c.speaker) for c in cues]
 
 
 # ------------------------------------------------------------------------------- the check

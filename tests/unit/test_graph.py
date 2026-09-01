@@ -333,19 +333,18 @@ def test_speakers_counts_and_names_the_unattributed():
     assert speakers(cues) == {"Priya Nair": 2, "(unattributed)": 1}
 
 
-def test_to_segments_hits_the_seam_and_drops_the_speaker():
-    """The documented loss. `Segment` has no speaker field, so the name dies at the boundary.
+def test_to_segments_passes_the_speaker():
+    """VRAG-026: speaker now survives the VttCue → Segment boundary.
 
-    Asserted rather than left implicit because it is the argument for the task that adds the
-    field: everything downstream consumes `Segment`, so until it carries a speaker, the one
-    thing Graph knows and whisper cannot is discarded here.
+    Previously the name was dropped here because Segment had no field for it.
+    Now it rides as Segment.speaker and must survive to every downstream hop.
     """
     from src.transcript import Segment
 
     segments = to_segments(parse_vtt(TEAMS_VTT))
     assert all(isinstance(s, Segment) for s in segments)
     assert [s.text for s in segments][0] == "Let's start with the migration."
-    assert not hasattr(segments[0], "speaker")
+    assert segments[0].speaker == "Priya Nair"
 
 
 # ---------------------------------------------------------------------------
