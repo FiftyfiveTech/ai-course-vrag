@@ -125,6 +125,7 @@ heldout-check:
 # pytest; this prints the intersection size on its own, which is what goes on the card.
 leakage-check:
 	uv run python -m src.leakage
+	uv run python -m src.leakage --dev evals/minutes/dev --heldout evals/minutes/heldout
 
 # tests/unit is the whole unit suite and tests/gates is the phase gates; the split is the
 # directory layout now rather than an --ignore flag, because VRAG-009's acceptance criterion
