@@ -61,6 +61,10 @@ from src.telemetry import Meter
 # the check below agree on what "configured" means.
 CREDENTIALS = ("GRAPH_TENANT_ID", "GRAPH_CLIENT_ID", "GRAPH_CLIENT_SECRET")
 
+# An Entra object id. Needed because /onlineMeetings rejects a UPN with a 400 that names
+# neither which id it wanted nor where to find it (measured 2026-08-31).
+_GUID = re.compile(r"[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}")
+
 PASS, FAIL, WARN, SKIP = "PASS", "FAIL", "WARN", "SKIP"
 
 
@@ -141,8 +145,8 @@ GRAPH_HINTS: dict[str, str] = {
         "also grant an application access policy for the meeting organiser -\n"
         "    New-CsApplicationAccessPolicy -Identity vrag-read -AppIds '<client id>' "
         "-Description 'VRAG transcript read'\n"
-        "    Grant-CsApplicationAccessPolicy -PolicyName vrag-read -Identity '<organiser "
-        "object id>'\n"
+        "    Grant-CsApplicationAccessPolicy -PolicyName vrag-read -Identity "
+        "'<organiser UPN or object id>'\n"
         "Allow ~30 minutes for the policy to propagate before re-running this."
     ),
     "Unauthorized": (
@@ -157,11 +161,60 @@ GRAPH_HINTS: dict[str, str] = {
         "no such object under this user. Check --user is the meeting *organiser*: a "
         "meeting lives under the organiser's calendar and nobody else's."
     ),
+    # MEASURED 2026-08-31 against this tenant, and the reason this entry is not a guess.
+    # Microsoft shipped a tenant control for Graph transcript access that is OFF BY DEFAULT
+    # and has been enforced since 29 July 2026. It sits ABOVE the app role: every request
+    # 403s with this code however much admin consent the app was granted, so a fully green
+    # `roles` section proves nothing about whether a transcript can be read.
+    #
+    # There are TWO switches and only the second one is about names:
+    #   EnableGraphTranscriptAccess   can Graph read transcripts at all
+    #   EnableAttributedTranscripts   do those transcripts carry <v Name> voice tags
+    # Both default false. Enabling the first alone yields readable, valid, UNATTRIBUTED VTT
+    # - which is worth exactly what whisper already gives us for free.
+    #
+    #   Set-CsTeamsMeetingConfiguration -EnableGraphTranscriptAccess true     #       -EnableAttributedTranscripts true -Identity Global
+    #
+    # https://learn.microsoft.com/microsoftteams/meeting-transcript-api-access
+    "GraphAccessToTranscriptsDisabled": (
+        "the tenant has Graph API access to transcripts turned OFF, and this sits above the "
+        "app role - no amount of admin consent overrides it. Off by default and enforced "
+        "since 29 July 2026, so a tenant that never touched the setting is a tenant that "
+        "blocks this. A Teams administrator turns it on in the admin center at Meetings -> "
+        "Meeting settings -> Transcript API access -> Microsoft Graph access, then "
+        "Configure -> Include speaker attribution; or in PowerShell:\n"
+        "    Set-CsTeamsMeetingConfiguration -EnableGraphTranscriptAccess true "
+        "-EnableAttributedTranscripts true -Identity Global\n"
+        "Ask for BOTH. The first makes the transcript readable; only the second makes it "
+        "carry the speaker names, which is the entire reason to prefer Graph over whisper."
+    ),
     "SpeakerAttributionNotAllowed": (
-        "the transcript exists and the tenant forbids handing over WHO said each line. "
-        "This is the tenant switch that makes the graph arm useless for minutes: without "
-        "voice tags the VTT is unattributed text, which is what whisper already gives us "
-        "for free. Ask the Teams admin whether attribution can be allowed for this app."
+        "the transcript is readable and the tenant forbids handing over WHO said each line - "
+        "EnableGraphTranscriptAccess is on and EnableAttributedTranscripts is off. This is "
+        "the switch that makes the graph arm useless for minutes: without voice tags the VTT "
+        "is unattributed text, which whisper already produces for free. The fix is the "
+        "second half of the command in the entry above."
+    ),
+    # The only way a call from this repo could ever cost money, and therefore the one error
+    # that must never read as a generic failure. CLAUDE.md: any paid call is a STOP-and-ask,
+    # not a judgement call.
+    #
+    # It should be unreachable. The transcript and recording content APIs were metered -
+    # $0.0022 and $0.003 per minute of content - and Microsoft stopped charging on
+    # 25 August 2025; the payment-models article is deprecated and due for removal in June
+    # 2026. Nothing this client calls is on any remaining meter.
+    #
+    # It is handled anyway because "unreachable" is a claim about Microsoft's price list,
+    # not about our code, and the failure mode of being wrong is a bill.
+    "PaymentRequired": (
+        "Graph answered 402 Payment Required, which means a call from this repo has hit a "
+        "METERED api. STOP - do not retry, do not configure billing to make it pass. Zero "
+        "spend is a project rule and a paid call is a STOP-and-ask (CLAUDE.md).\n"
+        "Two known causes. Either an Azure billing subscription is attached to this app "
+        "registration, which is what turns metered evaluation quotas into charges - detach "
+        "it rather than paying it. Or the call reached the Teams meeting AI insights api "
+        "(/copilot/.../aiInsights), which needs a Microsoft 365 Copilot licence per user; "
+        "nothing here should be calling that."
     ),
     "TooManyRequests": (
         "Graph throttled this app. Back off for the Retry-After interval; Graph's limits "
@@ -500,6 +553,15 @@ class GraphClient:
         `user_id` must be the ORGANISER. The same meeting read under an attendee is a 404 —
         a meeting is a child of one calendar, not a tenant-wide object.
         """
+        if not _GUID.fullmatch(user_id.strip()):
+            raise GraphError(
+                f"/onlineMeetings needs the organiser's OBJECT ID, and {user_id!r} is not a "
+                f"GUID. This route is the exception: most /users/{{id}} routes take a UPN, "
+                f"this one answers 400 'The userId in request URL is not a valid GUID'. "
+                f"Find it in Entra admin center -> Users -> the person -> Object ID, or "
+                f"grant User.Read.All and pass the UPN.",
+                code="NotAGuid",
+            )
         quoted = join_web_url.replace("'", "''")  # OData escapes a quote by doubling it
         items = list(
             self.paged(
@@ -527,6 +589,39 @@ class GraphClient:
             self.paged(
                 f"users/{urllib.parse.quote(user_id, safe='')}"
                 f"/onlineMeetings/{urllib.parse.quote(meeting_id, safe='')}/transcripts"
+            )
+        )
+
+    def list_organiser_transcripts(self, user_id: str) -> list[dict[str, Any]]:
+        """Every transcript this organiser has, across all their meetings.
+
+        THE DISCOVERY ROUTE, and the answer to "which meetings can I read". Graph exposes no
+        collection GET on onlineMeetings - `GET /users/{id}/onlineMeetings` with no filter is
+        a 400, "One of the required parameters to lookup meeting by QueryOptions is null or
+        empty" - so a meeting can only be fetched by id or by joinWebUrl. Enumeration has to
+        come from somewhere else.
+
+        The obvious somewhere else is the calendar (`/calendarView`, each event carrying
+        `onlineMeeting.joinUrl`), and it costs `Calendars.Read` as an APPLICATION permission,
+        which reads every mailbox in the tenant. This route costs nothing extra: it is
+        covered by `OnlineMeetingTranscript.Read.All`, which the transcript read needs anyway.
+
+        It is also the better fit. A notetaker does not want every meeting; it wants the ones
+        that produced a transcript, which is what this returns and what a calendar sweep would
+        have to filter down to.
+
+        Two shape details, both measured rather than read (2026-08-31):
+
+        * the organiser id is an ODATA FUNCTION PARAMETER, not a query parameter. As
+          `?meetingOrganizerUserId=` it is a 400, "expected as a function parameter".
+        * it must equal the id in the path. Passing two different values is a 400, "The
+          userId must match organizerId" - so this takes one id and uses it twice.
+        """
+        ident = urllib.parse.quote(user_id, safe="")
+        return list(
+            self.paged(
+                f"users/{ident}/onlineMeetings/getAllTranscripts"
+                f"(meetingOrganizerUserId='{ident}')"
             )
         )
 
@@ -575,6 +670,19 @@ def _token_error(exc: urllib.error.HTTPError) -> GraphError:
     )
 
 
+# Graph does not agree with itself about the casing of `innerError.code`: the onlineMeetings
+# route answers `forbidden` and the recordings route answers `Forbidden` for the same 403 with
+# the same cause (measured 2026-08-31). An exact-match lookup therefore dropped the hint on
+# precisely the error whose remedy is hardest to guess - the application access policy - so
+# the lookup is folded rather than keyed literally.
+_GRAPH_HINTS_FOLDED = {key.casefold(): value for key, value in GRAPH_HINTS.items()}
+
+
+def _hint_for(code: str) -> str:
+    """The hint for a Graph error code, matched without regard to case."""
+    return _GRAPH_HINTS_FOLDED.get(code.strip().casefold(), "")
+
+
 def _graph_error(exc: urllib.error.HTTPError, url: str) -> GraphError:
     """Turn a Graph HTTPError into a GraphError carrying `error.code`.
 
@@ -589,7 +697,17 @@ def _graph_error(exc: urllib.error.HTTPError, url: str) -> GraphError:
     inner = inner if isinstance(inner, dict) else {}
     code = str(inner.get("code") or payload.get("code") or "")
     message = str(payload.get("message") or "").splitlines()
-    hint = GRAPH_HINTS.get(code) or GRAPH_HINTS.get(str(payload.get("code") or "")) or ""
+    hint = _hint_for(code) or _hint_for(str(payload.get("code") or ""))
+    # Matched on the status and not on a code: 402 is the one response whose meaning is
+    # carried by the status line, and the codes Microsoft puts in its body vary by which
+    # meter was hit. Overrides any code-derived hint, because "this costs money" outranks
+    # whatever else the body said.
+    if exc.code == 402:
+        # Unconditional, not `code or ...`. A 402 body carries whatever code the meter felt
+        # like - "Forbidden" in the wild - and a caller branching on that would treat a bill
+        # as a permissions problem and retry it. The status is the fact; the body is noise.
+        code = "PaymentRequired"
+        hint = GRAPH_HINTS["PaymentRequired"]
     return GraphError(
         f"GET {url} returned {exc.code} ({code or 'no code'})"
         + (f": {message[0]}" if message else ""),
@@ -914,6 +1032,113 @@ def check(
             )
         )
 
+    # The tenant switch, before anything that needs a meeting id. This is the check that
+    # stops the table lying: Graph transcript access is a TENANT control, off by default and
+    # enforced since 29 July 2026, and it sits above the app role. Every section above can be
+    # green on a tenant where no transcript can ever be read, so a "PASS" that only proved
+    # auth is a green light on a blocked road.
+    #
+    # getAllTranscripts is what makes it cheap - it needs an organiser id and no meeting id,
+    # so the switch is knowable before anyone hunts down a join url.
+    # The Teams application access policy, which is a DIFFERENT grant from the app role and
+    # from the tenant transcript switch. Without it the meeting object itself is unreadable:
+    #
+    #   403 forbidden - No application access policy found for this app <client id> on the user
+    #
+    # Probed with a joinWebUrl that belongs to nobody, which is what makes it cheap and
+    # side-effect free: no policy is a 403 naming the app, a policy in place is an empty 200,
+    # because a url nobody owns matches nothing. Only meaningful for a GUID - the route
+    # refuses a UPN before it evaluates any policy.
+    if user and _GUID.fullmatch(user.strip()):
+        try:
+            client.find_online_meeting(user, "https://teams.microsoft.com/l/meetup-join/vrag-probe")
+            findings.append(
+                Finding("tenant", "application access policy", PASS, "in place for this user")
+            )
+        except GraphError as exc:
+            if exc.code == "NotFound":
+                findings.append(
+                    Finding(
+                        "tenant",
+                        "application access policy",
+                        PASS,
+                        "in place - the probe url matched nothing, which is the point",
+                    )
+                )
+            elif exc.status == 403:
+                findings.append(
+                    Finding("tenant", "application access policy", FAIL, str(exc))
+                )
+                if exc.hint:
+                    findings.append(Finding("tenant", "fix", WARN, exc.hint))
+            else:
+                findings.append(
+                    Finding("tenant", "application access policy", WARN, f"inconclusive - {exc}")
+                )
+
+    if user:
+        try:
+            found = client.list_organiser_transcripts(user)
+            findings.append(
+                Finding(
+                    "tenant",
+                    "transcript API access",
+                    PASS,
+                    f"enabled - {len(found)} transcript(s) readable for this organiser",
+                )
+            )
+        except GraphError as exc:
+            # FAIL on anything, and let the code choose only the hint. The previous version
+            # FAILed on GraphAccessToTranscriptsDisabled and WARNed on everything else, so
+            # when the tenant switch was turned on and the error became a bare `Forbidden`
+            # from the next gate down, the whole check went green over a tenant where no
+            # transcript could be read. Cannot list transcripts, cannot pass.
+            findings.append(Finding("tenant", "transcript API access", FAIL, str(exc)))
+            if exc.code == "GraphAccessToTranscriptsDisabled":
+                findings.append(Finding("tenant", "fix", WARN, exc.hint))
+            elif exc.status == 403:
+                # A 403 that is NOT the tenant switch means the switch is no longer the
+                # blocker. getAllTranscripts reports this one as `Forbidden`/`UnknownError`
+                # with no inner code at all, unlike the meeting routes which name the policy
+                # outright - so the hint has to supply what the response does not.
+                findings.append(
+                    Finding(
+                        "tenant",
+                        "fix",
+                        WARN,
+                        "this is NOT the tenant transcript switch - that one answers "
+                        "GraphAccessToTranscriptsDisabled and it did not. So transcript "
+                        "access is on and what is left is the Teams application access "
+                        "policy. getAllTranscripts reports it as a bare Forbidden with no "
+                        "inner code, so there is nothing in the response that says so.\n"
+                        + GRAPH_HINTS["Forbidden"]
+                    )
+                )
+            else:
+                findings.append(
+                    Finding(
+                        "tenant",
+                        "fix",
+                        WARN,
+                        "not a 403, so neither gate explains it - a network or token problem "
+                        "rather than a grant. Re-run; if it persists the message above is "
+                        "the whole of what Graph said.",
+                    )
+                )
+            return findings
+    else:
+        findings.append(
+            Finding(
+                "tenant",
+                "transcript API access",
+                SKIP,
+                "unknown without --user. This is a TENANT switch that sits above the app "
+                "role, it is off by default, and it has been enforced since 29 July 2026 - "
+                "so everything green above is compatible with no transcript being readable "
+                "at all. Pass --user <organiser upn> to settle it.",
+            )
+        )
+
     if not meeting:
         findings.append(
             Finding(
@@ -921,8 +1146,9 @@ def check(
                 "speaker names",
                 SKIP,
                 "pass --user <organiser upn> --meeting <join url|meeting id> to find out "
-                "whether Teams hands this tenant attributed text. That is the question the "
-                "graph arm lives or dies on and no amount of green above answers it.",
+                "whether Teams hands this tenant ATTRIBUTED text. Access and attribution are "
+                "two different switches: the first makes the VTT readable, only the second "
+                "puts <v Name> in it, and only the second is why this arm beats whisper.",
             )
         )
         return findings
@@ -1193,6 +1419,55 @@ def _report_vtt(path: Path, out=None) -> int:
     return 0 if any(c.speaker for c in cues) else 1
 
 
+def _report_list(cfg: Config, user: str, out=None) -> int:
+    """`--list`: which of this organiser's meetings have a transcript to read.
+
+    Prints the meeting id beside each one, because that id is what `--meeting` takes and it
+    appears nowhere in the Teams UI - so this is also how the input to the next command is
+    obtained without a join url.
+    """
+    out = out or sys.stdout
+    client = GraphClient(cfg=cfg)
+    try:
+        items = client.list_organiser_transcripts(user)
+    except GraphError as exc:
+        print(f"FAIL  {exc}", file=out)
+        if exc.hint:
+            print("", file=out)
+            print(exc.hint, file=out)
+        return 1
+    if not items:
+        print(
+            f"{user} has no transcripts Graph will return. Either no meeting of theirs was "
+            f"transcribed - somebody has to press Start transcription, and a recording does "
+            f"not imply one - or they are not the organiser of the ones you mean.",
+            file=out,
+        )
+        return 0
+
+    print(f"{len(items)} transcript(s) for {user}", file=out)
+    print("", file=out)
+    # Grouped by meeting: a long meeting that was stopped and restarted carries several
+    # transcripts, and listing them flat reads as several meetings.
+    by_meeting: dict[str, list[dict[str, Any]]] = {}
+    for item in items:
+        key = str(item.get("meetingId") or "(no meetingId)")
+        by_meeting.setdefault(key, []).append(item)
+    for meeting_id, group in by_meeting.items():
+        newest = max(group, key=lambda i: str(i.get("createdDateTime") or ""))
+        when = str(newest.get("createdDateTime") or "(no date)")
+        print(f"  {when:<26} {meeting_id}", file=out)
+        if len(group) > 1:
+            print(f"  {'':<26} ({len(group)} transcripts on this meeting)", file=out)
+    print("", file=out)
+    print("Read one:", file=out)
+    print(
+        f'  make graph-check GRAPH_FLAGS="--user {user} --meeting <meeting id above>"',
+        file=out,
+    )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--config", default="config.toml")
@@ -1206,6 +1481,14 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="a Teams join url, or an onlineMeeting id. With --user, fetches the transcript "
         "and prints who Teams says was speaking.",
+    )
+    parser.add_argument(
+        "--list",
+        action="store_true",
+        dest="list_meetings",
+        help="with --user, list every meeting of theirs that HAS a transcript. This is how "
+        "you find out what is readable: Graph has no way to enumerate onlineMeetings, so "
+        "there is no list of meetings to browse - only a list of transcripts.",
     )
     parser.add_argument(
         "--no-probe",
@@ -1223,6 +1506,20 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.vtt is not None:
         return _report_vtt(args.vtt)
+
+    if args.list_meetings:
+        if not args.user:
+            print(
+                "--list needs --user <organiser upn or object id>: transcripts are listed "
+                "per organiser, because Graph has no tenant-wide transcript collection.",
+                file=sys.stderr,
+            )
+            return 1
+        try:
+            return _report_list(load_config(args.config), args.user)
+        except ConfigError as exc:
+            print(f"config: {exc}", file=sys.stderr)
+            return 1
 
     try:
         cfg = load_config(args.config)

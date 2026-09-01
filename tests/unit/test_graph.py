@@ -491,7 +491,7 @@ def test_graph_error_prefers_inner_error_code():
         "https://graph.microsoft.test/v1.0/x",
     )
     assert error.code == "SpeakerAttributionNotAllowed"
-    assert "whisper already gives us for free" in error.hint
+    assert "EnableAttributedTranscripts" in error.hint
 
 
 def test_graph_error_403_hint_names_the_second_grant():
@@ -597,7 +597,7 @@ def test_find_online_meeting_doubles_a_quote_in_the_odata_filter(tmp_path, creds
     """OData escapes a single quote by doubling it. Not doing so breaks the filter."""
     calls = fake_http(lambda r: token_body() if r.method == "POST" else {"value": [{"id": "m1"}]})
     client = client_for(tmp_path, creds)
-    client.find_online_meeting("user-1", "https://teams.test/l/it's-a-url")
+    client.find_online_meeting("11111111-2222-3333-4444-555555555555", "https://teams.test/l/it's-a-url")
     get = next(c for c in calls if c.method == "GET")
     assert "it''s-a-url" in urllib.parse.unquote(get.full_url)
 
@@ -605,7 +605,9 @@ def test_find_online_meeting_doubles_a_quote_in_the_odata_filter(tmp_path, creds
 def test_find_online_meeting_with_no_match_says_which_two_things_to_check(tmp_path, creds, fake_http):
     fake_http(lambda r: token_body() if r.method == "POST" else {"value": []})
     with pytest.raises(GraphError) as exc:
-        client_for(tmp_path, creds).find_online_meeting("user-1", "https://teams.test/x")
+        client_for(tmp_path, creds).find_online_meeting(
+            "11111111-2222-3333-4444-555555555555", "https://teams.test/x"
+        )
     assert exc.value.code == "NotFound"
     assert "organiser" in str(exc.value)
 
@@ -1055,3 +1057,232 @@ def test_graph_health_does_not_affect_the_answering_health_check(tmp_path, no_en
     # /health needs the answer levers, which this config does not carry; what matters is
     # that /graph/health being unready never turns into a 5xx on the ask path.
     assert TestClient(app).get("/graph/health").status_code == 200
+
+
+# --------------------------------------------------------------------------------------
+# What the tenant actually said on 2026-08-31. Both of these are regression tests for a
+# diagnosis that took four probes to reach, and the thing worth protecting is that the
+# error text names the switch an administrator has to flip.
+
+
+def test_find_online_meeting_refuses_a_upn_before_spending_a_request(tmp_path, creds, fake_http):
+    """The one /users/{id} route that will not take a UPN.
+
+    Graph answers 400 "The userId in request URL is not a valid GUID", which says neither
+    which of a person's two ids it means nor where to find the other one. Caught here so the
+    message can, and caught BEFORE the call so a wrong id costs nothing.
+    """
+    calls = fake_http(lambda r: token_body())
+    with pytest.raises(GraphError) as exc:
+        client_for(tmp_path, creds).find_online_meeting(
+            "amy@contoso.test", "https://teams.test/x"
+        )
+    assert exc.value.code == "NotAGuid"
+    assert "Object ID" in str(exc.value)
+    # No GET was made: the guard runs before the request, not on its error.
+    assert not [c for c in calls if c.method == "GET"]
+
+
+def test_tenant_transcript_switch_hint_names_both_settings():
+    """The 403 that is not a permission problem.
+
+    Graph transcript access is a tenant control, off by default, enforced since 29 July 2026,
+    and it sits above the app role - so a fully-consented app still 403s. There are two
+    switches and only the second one is about names, which is why the hint has to name both:
+    enabling access alone yields valid, readable, UNATTRIBUTED VTT.
+    """
+    error = _graph_error(
+        http_error(
+            403,
+            {
+                "error": {
+                    "code": "Forbidden",
+                    "message": "Graph API access to transcripts is disabled for this tenant.",
+                    "innerError": {"code": "GraphAccessToTranscriptsDisabled"},
+                }
+            },
+        ),
+        "https://graph.microsoft.test/v1.0/x",
+    )
+    assert error.code == "GraphAccessToTranscriptsDisabled"
+    assert "EnableGraphTranscriptAccess" in error.hint
+    assert "EnableAttributedTranscripts" in error.hint
+    assert "Set-CsTeamsMeetingConfiguration" in error.hint
+
+
+def test_get_all_transcripts_uses_a_function_parameter_and_repeats_the_id(tmp_path, creds, fake_http):
+    """Two shapes Graph rejects, both measured.
+
+    `?meetingOrganizerUserId=` is a 400, "expected as a function parameter". Two different
+    ids is a 400, "The userId must match organizerId". So the organiser id goes in the path
+    AND in parentheses, and it is the same value in both.
+    """
+    calls = fake_http(
+        lambda r: token_body() if r.method == "POST" else {"value": [{"id": "t1"}]}
+    )
+    client_for(tmp_path, creds).list_organiser_transcripts("11111111-2222-3333-4444-555555555555")
+    url = urllib.parse.unquote(next(c for c in calls if c.method == "GET").full_url)
+    assert "getAllTranscripts(meetingOrganizerUserId='11111111-2222-3333-4444-555555555555')" in url
+    assert "users/11111111-2222-3333-4444-555555555555/onlineMeetings/getAllTranscripts" in url
+    assert "?meetingOrganizerUserId" not in url
+def test_graph_hint_lookup_is_case_insensitive():
+    """Graph disagrees with itself about the casing of innerError.code.
+
+    Measured 2026-08-31: the onlineMeetings route answers `forbidden` and the recordings
+    route answers `Forbidden`, same 403, same cause - no application access policy. An
+    exact-match lookup dropped the hint on the one error whose remedy nobody guesses, so the
+    table is folded. This asserts the fold, not the wording.
+    """
+    from src.graph import GRAPH_HINTS, _hint_for
+
+    for code in GRAPH_HINTS:
+        assert _hint_for(code)
+        assert _hint_for(code.lower()) == GRAPH_HINTS[code]
+        assert _hint_for(code.upper()) == GRAPH_HINTS[code]
+    assert _hint_for("  forbidden  ") == GRAPH_HINTS["Forbidden"]
+    assert _hint_for("NoSuchCodeAnywhere") == ""
+
+
+def test_the_two_403s_are_different_blockers_with_different_fixes():
+    """A missing access policy and a disabled tenant switch are not the same problem.
+
+    Both are 403s on the same app with the same roles granted, and they need two different
+    administrators to do two different things. Conflating them costs a round trip to IT, so
+    each hint has to name its own cmdlet and neither may name the other's.
+    """
+    policy = _graph_error(
+        http_error(
+            403,
+            {
+                "error": {
+                    "code": "Forbidden",
+                    "message": "No application access policy found for this app.",
+                    "innerError": {"code": "forbidden"},
+                }
+            },
+        ),
+        "https://graph.microsoft.test/v1.0/x",
+    )
+    switch = _graph_error(
+        http_error(
+            403,
+            {
+                "error": {
+                    "code": "Forbidden",
+                    "message": "Graph API access to transcripts is disabled for this tenant.",
+                    "innerError": {"code": "GraphAccessToTranscriptsDisabled"},
+                }
+            },
+        ),
+        "https://graph.microsoft.test/v1.0/x",
+    )
+    assert "New-CsApplicationAccessPolicy" in policy.hint
+    assert "Set-CsTeamsMeetingConfiguration" not in policy.hint
+    assert "Set-CsTeamsMeetingConfiguration" in switch.hint
+    assert "New-CsApplicationAccessPolicy" not in switch.hint
+
+
+def test_a_402_is_a_stop_and_not_a_retry():
+    """The only response that could ever cost money.
+
+    Nothing this client calls is metered - the transcript and recording content APIs were,
+    and Microsoft stopped charging on 25 August 2025 - so this should be unreachable. It is
+    asserted anyway, because "unreachable" is a claim about someone else's price list and
+    the failure mode of being wrong is a bill.
+
+    Matched on the status, because 402 is the one response whose meaning is in the status
+    line rather than in a code, and it must beat whatever hint the body would have produced.
+    """
+    error = _graph_error(
+        http_error(402, {"error": {"code": "Forbidden", "message": "Payment required."}}),
+        "https://graph.microsoft.test/v1.0/x",
+    )
+    assert error.status == 402
+    assert error.code == "PaymentRequired"
+    assert "STOP" in error.hint
+    # Must not tell anyone to make it pass by paying.
+    assert "do not configure billing" in error.hint
+    # The Forbidden hint would otherwise have won on the outer code.
+    assert "New-CsApplicationAccessPolicy" not in error.hint
+def test_a_403_on_transcripts_fails_even_when_it_is_not_the_tenant_switch(
+    tmp_path, env_with_creds, fake_http
+):
+    """The regression. This check has claimed PASS over a blocked tenant twice.
+
+    First version: only probed auth, so it passed while the tenant switch was off.
+    Second version: FAILed on GraphAccessToTranscriptsDisabled and WARNed on anything else -
+    so the moment the switch was turned ON and the error became a bare `Forbidden` from the
+    application access policy behind it, the whole table went green with 0 FAIL over a
+    tenant where not one transcript could be read.
+
+    getAllTranscripts reports that second gate as Forbidden/UnknownError with no inner code
+    at all, so there is nothing in the response to key on. Hence: cannot list transcripts,
+    cannot pass. The code picks the hint, never the verdict.
+    """
+
+    def handler(request):
+        if request.method == "POST":
+            return token_body(
+                roles=["OnlineMeetingTranscript.Read.All", "OnlineMeetings.Read.All"]
+            )
+        url = request.full_url
+        if "getAllTranscripts" in url:
+            return http_error(
+                403, {"error": {"code": "Forbidden", "message": "UnknownError"}}
+            )
+        return {"value": [{"displayName": "Contoso"}]}
+
+    fake_http(handler)
+    findings = check(load_config(write_config(tmp_path)), user="amy@contoso.test")
+
+    tenant = next(
+        f for f in findings if f.section == "tenant" and f.name == "transcript API access"
+    )
+    assert tenant.status == FAIL, "a 403 on transcripts must never be a WARN"
+    # The whole point: the run as a whole must not report success.
+    assert any(f.status == FAIL for f in findings)
+
+    # And the hint must send them to the right administrator action, which the response
+    # itself does not name.
+    fix = next(f for f in findings if f.section == "tenant" and f.name == "fix")
+    assert "NOT the tenant transcript switch" in fix.detail
+    assert "New-CsApplicationAccessPolicy" in fix.detail
+
+
+def test_the_tenant_switch_403_still_names_its_own_cmdlet(tmp_path, env_with_creds, fake_http):
+    """The other branch of the same probe: same FAIL verdict, different fix.
+
+    Told apart so nobody is sent to run New-CsApplicationAccessPolicy when the actual
+    blocker is a meeting-configuration toggle, and vice versa.
+    """
+
+    def handler(request):
+        if request.method == "POST":
+            return token_body(
+                roles=["OnlineMeetingTranscript.Read.All", "OnlineMeetings.Read.All"]
+            )
+        if "getAllTranscripts" in request.full_url:
+            return http_error(
+                403,
+                {
+                    "error": {
+                        "code": "Forbidden",
+                        "message": "disabled for this tenant",
+                        "innerError": {"code": "GraphAccessToTranscriptsDisabled"},
+                    }
+                },
+            )
+        return {"value": [{"displayName": "Contoso"}]}
+
+    fake_http(handler)
+    findings = check(load_config(write_config(tmp_path)), user="amy@contoso.test")
+
+    tenant = next(
+        f for f in findings if f.section == "tenant" and f.name == "transcript API access"
+    )
+    assert tenant.status == FAIL
+    fix = next(f for f in findings if f.section == "tenant" and f.name == "fix")
+    assert "Set-CsTeamsMeetingConfiguration" in fix.detail
+    assert "EnableAttributedTranscripts" in fix.detail
+    # Must not send them down the other gate's path.
+    assert "NOT the tenant transcript switch" not in fix.detail
