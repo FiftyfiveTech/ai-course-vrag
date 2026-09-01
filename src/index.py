@@ -50,6 +50,7 @@ def to_embed_chunks(rows: list[dict]) -> list[EmbedChunk]:
             t_start=float(r["t_start"]),
             t_end=float(r["t_end"]),
             text=r["text"],
+            speakers=list(r.get("speakers", [])),
         )
         for r in rows
     ]

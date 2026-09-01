@@ -77,6 +77,7 @@ class Chunk:
     window_index: int  # which grid window produced it
     window_t_start: float
     window_t_end: float
+    speakers: tuple[str, ...] = ()  # VRAG-026: distinct named speakers across this chunk's segments
 
     @property
     def duration_s(self) -> float:
@@ -93,6 +94,7 @@ class Chunk:
             "chars": len(self.text),
             "n_segments": self.n_segments,
             "segment_ids": list(self.segment_ids),
+            "speakers": list(self.speakers),
             "window_index": self.window_index,
             "window_t_start": round(self.window_t_start, 3),
             "window_t_end": round(self.window_t_end, 3),
@@ -207,6 +209,7 @@ def chunk_segments(
                 text=" ".join(s.text for s in members),
                 n_segments=len(members),
                 segment_ids=ids,
+                speakers=tuple(sorted({s.speaker for s in members if s.speaker})),
                 window_index=index,
                 window_t_start=w_start,
                 window_t_end=w_end,
@@ -349,7 +352,7 @@ def save_transcript(
         "model": cfg.get("transcript.model"),
         "language": cfg.get("transcript.language"),
         "segments": [
-            {"t_start": round(s.t_start, 3), "t_end": round(s.t_end, 3), "text": s.text}
+            {"t_start": round(s.t_start, 3), "t_end": round(s.t_end, 3), "text": s.text, "speaker": s.speaker}
             for s in segments
         ],
     }
@@ -368,7 +371,7 @@ def load_transcript(path: Path) -> tuple[list[Segment], dict[str, Any]]:
     for i, s in enumerate(raw):
         try:
             segments.append(
-                Segment(t_start=float(s["t_start"]), t_end=float(s["t_end"]), text=s["text"])
+                Segment(t_start=float(s["t_start"]), t_end=float(s["t_end"]), text=s["text"], speaker=s.get("speaker"))
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise ChunkError(f"{path}: segment {i} is malformed ({exc})") from exc

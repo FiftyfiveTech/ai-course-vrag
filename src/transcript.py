@@ -47,6 +47,7 @@ class Segment:
     t_start: float  # seconds from video start
     t_end: float
     text: str
+    speaker: str | None = None  # VRAG-026: voice tag from VTT, None when unattributed
 
 
 # ---------------------------------------------------------------------------
@@ -231,7 +232,7 @@ def offset_segments(segments: list[Segment], offset_s: float) -> list[Segment]:
     if not offset_s:
         return segments
     return [
-        Segment(t_start=s.t_start + offset_s, t_end=s.t_end + offset_s, text=s.text)
+        Segment(t_start=s.t_start + offset_s, t_end=s.t_end + offset_s, text=s.text, speaker=s.speaker)
         for s in segments
     ]
 
@@ -356,7 +357,7 @@ def bound_to_audio(
         if s.t_end > duration_s:
             clamped += 1
             worst = max(worst, s.t_end - duration_s)
-            kept.append(Segment(t_start=s.t_start, t_end=duration_s, text=s.text))
+            kept.append(Segment(t_start=s.t_start, t_end=duration_s, text=s.text, speaker=s.speaker))
             continue
         kept.append(s)
 
