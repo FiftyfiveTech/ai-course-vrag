@@ -145,8 +145,8 @@ GRAPH_HINTS: dict[str, str] = {
         "also grant an application access policy for the meeting organiser -\n"
         "    New-CsApplicationAccessPolicy -Identity vrag-read -AppIds '<client id>' "
         "-Description 'VRAG transcript read'\n"
-        "    Grant-CsApplicationAccessPolicy -PolicyName vrag-read -Identity '<organiser "
-        "object id>'\n"
+        "    Grant-CsApplicationAccessPolicy -PolicyName vrag-read -Identity "
+        "'<organiser UPN or object id>'\n"
         "Allow ~30 minutes for the policy to propagate before re-running this."
     ),
     "Unauthorized": (
@@ -1088,17 +1088,44 @@ def check(
                 )
             )
         except GraphError as exc:
+            # FAIL on anything, and let the code choose only the hint. The previous version
+            # FAILed on GraphAccessToTranscriptsDisabled and WARNed on everything else, so
+            # when the tenant switch was turned on and the error became a bare `Forbidden`
+            # from the next gate down, the whole check went green over a tenant where no
+            # transcript could be read. Cannot list transcripts, cannot pass.
+            findings.append(Finding("tenant", "transcript API access", FAIL, str(exc)))
             if exc.code == "GraphAccessToTranscriptsDisabled":
-                findings.append(
-                    Finding("tenant", "transcript API access", FAIL, str(exc))
-                )
                 findings.append(Finding("tenant", "fix", WARN, exc.hint))
-                return findings
-            # Anything else is not the switch: report it and carry on to the meeting, which
-            # may well work - a UPN that cannot be listed can still be read by object id.
-            findings.append(
-                Finding("tenant", "transcript API access", WARN, f"inconclusive - {exc}")
-            )
+            elif exc.status == 403:
+                # A 403 that is NOT the tenant switch means the switch is no longer the
+                # blocker. getAllTranscripts reports this one as `Forbidden`/`UnknownError`
+                # with no inner code at all, unlike the meeting routes which name the policy
+                # outright - so the hint has to supply what the response does not.
+                findings.append(
+                    Finding(
+                        "tenant",
+                        "fix",
+                        WARN,
+                        "this is NOT the tenant transcript switch - that one answers "
+                        "GraphAccessToTranscriptsDisabled and it did not. So transcript "
+                        "access is on and what is left is the Teams application access "
+                        "policy. getAllTranscripts reports it as a bare Forbidden with no "
+                        "inner code, so there is nothing in the response that says so.\n"
+                        + GRAPH_HINTS["Forbidden"]
+                    )
+                )
+            else:
+                findings.append(
+                    Finding(
+                        "tenant",
+                        "fix",
+                        WARN,
+                        "not a 403, so neither gate explains it - a network or token problem "
+                        "rather than a grant. Re-run; if it persists the message above is "
+                        "the whole of what Graph said.",
+                    )
+                )
+            return findings
     else:
         findings.append(
             Finding(

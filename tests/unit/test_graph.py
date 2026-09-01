@@ -1205,4 +1205,85 @@ def test_a_402_is_a_stop_and_not_a_retry():
     assert "do not configure billing" in error.hint
     # The Forbidden hint would otherwise have won on the outer code.
     assert "New-CsApplicationAccessPolicy" not in error.hint
+def test_a_403_on_transcripts_fails_even_when_it_is_not_the_tenant_switch(
+    tmp_path, env_with_creds, fake_http
+):
+    """The regression. This check has claimed PASS over a blocked tenant twice.
 
+    First version: only probed auth, so it passed while the tenant switch was off.
+    Second version: FAILed on GraphAccessToTranscriptsDisabled and WARNed on anything else -
+    so the moment the switch was turned ON and the error became a bare `Forbidden` from the
+    application access policy behind it, the whole table went green with 0 FAIL over a
+    tenant where not one transcript could be read.
+
+    getAllTranscripts reports that second gate as Forbidden/UnknownError with no inner code
+    at all, so there is nothing in the response to key on. Hence: cannot list transcripts,
+    cannot pass. The code picks the hint, never the verdict.
+    """
+
+    def handler(request):
+        if request.method == "POST":
+            return token_body(
+                roles=["OnlineMeetingTranscript.Read.All", "OnlineMeetings.Read.All"]
+            )
+        url = request.full_url
+        if "getAllTranscripts" in url:
+            return http_error(
+                403, {"error": {"code": "Forbidden", "message": "UnknownError"}}
+            )
+        return {"value": [{"displayName": "Contoso"}]}
+
+    fake_http(handler)
+    findings = check(load_config(write_config(tmp_path)), user="amy@contoso.test")
+
+    tenant = next(
+        f for f in findings if f.section == "tenant" and f.name == "transcript API access"
+    )
+    assert tenant.status == FAIL, "a 403 on transcripts must never be a WARN"
+    # The whole point: the run as a whole must not report success.
+    assert any(f.status == FAIL for f in findings)
+
+    # And the hint must send them to the right administrator action, which the response
+    # itself does not name.
+    fix = next(f for f in findings if f.section == "tenant" and f.name == "fix")
+    assert "NOT the tenant transcript switch" in fix.detail
+    assert "New-CsApplicationAccessPolicy" in fix.detail
+
+
+def test_the_tenant_switch_403_still_names_its_own_cmdlet(tmp_path, env_with_creds, fake_http):
+    """The other branch of the same probe: same FAIL verdict, different fix.
+
+    Told apart so nobody is sent to run New-CsApplicationAccessPolicy when the actual
+    blocker is a meeting-configuration toggle, and vice versa.
+    """
+
+    def handler(request):
+        if request.method == "POST":
+            return token_body(
+                roles=["OnlineMeetingTranscript.Read.All", "OnlineMeetings.Read.All"]
+            )
+        if "getAllTranscripts" in request.full_url:
+            return http_error(
+                403,
+                {
+                    "error": {
+                        "code": "Forbidden",
+                        "message": "disabled for this tenant",
+                        "innerError": {"code": "GraphAccessToTranscriptsDisabled"},
+                    }
+                },
+            )
+        return {"value": [{"displayName": "Contoso"}]}
+
+    fake_http(handler)
+    findings = check(load_config(write_config(tmp_path)), user="amy@contoso.test")
+
+    tenant = next(
+        f for f in findings if f.section == "tenant" and f.name == "transcript API access"
+    )
+    assert tenant.status == FAIL
+    fix = next(f for f in findings if f.section == "tenant" and f.name == "fix")
+    assert "Set-CsTeamsMeetingConfiguration" in fix.detail
+    assert "EnableAttributedTranscripts" in fix.detail
+    # Must not send them down the other gate's path.
+    assert "NOT the tenant transcript switch" not in fix.detail
