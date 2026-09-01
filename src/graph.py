@@ -195,6 +195,27 @@ GRAPH_HINTS: dict[str, str] = {
         "is unattributed text, which whisper already produces for free. The fix is the "
         "second half of the command in the entry above."
     ),
+    # The only way a call from this repo could ever cost money, and therefore the one error
+    # that must never read as a generic failure. CLAUDE.md: any paid call is a STOP-and-ask,
+    # not a judgement call.
+    #
+    # It should be unreachable. The transcript and recording content APIs were metered -
+    # $0.0022 and $0.003 per minute of content - and Microsoft stopped charging on
+    # 25 August 2025; the payment-models article is deprecated and due for removal in June
+    # 2026. Nothing this client calls is on any remaining meter.
+    #
+    # It is handled anyway because "unreachable" is a claim about Microsoft's price list,
+    # not about our code, and the failure mode of being wrong is a bill.
+    "PaymentRequired": (
+        "Graph answered 402 Payment Required, which means a call from this repo has hit a "
+        "METERED api. STOP - do not retry, do not configure billing to make it pass. Zero "
+        "spend is a project rule and a paid call is a STOP-and-ask (CLAUDE.md).\n"
+        "Two known causes. Either an Azure billing subscription is attached to this app "
+        "registration, which is what turns metered evaluation quotas into charges - detach "
+        "it rather than paying it. Or the call reached the Teams meeting AI insights api "
+        "(/copilot/.../aiInsights), which needs a Microsoft 365 Copilot licence per user; "
+        "nothing here should be calling that."
+    ),
     "TooManyRequests": (
         "Graph throttled this app. Back off for the Retry-After interval; Graph's limits "
         "are per-app-per-tenant, so a second process sharing GRAPH_CLIENT_ID shares them."
@@ -677,6 +698,16 @@ def _graph_error(exc: urllib.error.HTTPError, url: str) -> GraphError:
     code = str(inner.get("code") or payload.get("code") or "")
     message = str(payload.get("message") or "").splitlines()
     hint = _hint_for(code) or _hint_for(str(payload.get("code") or ""))
+    # Matched on the status and not on a code: 402 is the one response whose meaning is
+    # carried by the status line, and the codes Microsoft puts in its body vary by which
+    # meter was hit. Overrides any code-derived hint, because "this costs money" outranks
+    # whatever else the body said.
+    if exc.code == 402:
+        # Unconditional, not `code or ...`. A 402 body carries whatever code the meter felt
+        # like - "Forbidden" in the wild - and a caller branching on that would treat a bill
+        # as a permissions problem and retry it. The status is the fact; the body is noise.
+        code = "PaymentRequired"
+        hint = GRAPH_HINTS["PaymentRequired"]
     return GraphError(
         f"GET {url} returned {exc.code} ({code or 'no code'})"
         + (f": {message[0]}" if message else ""),

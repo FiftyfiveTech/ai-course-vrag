@@ -1181,3 +1181,28 @@ def test_the_two_403s_are_different_blockers_with_different_fixes():
     assert "Set-CsTeamsMeetingConfiguration" not in policy.hint
     assert "Set-CsTeamsMeetingConfiguration" in switch.hint
     assert "New-CsApplicationAccessPolicy" not in switch.hint
+
+
+def test_a_402_is_a_stop_and_not_a_retry():
+    """The only response that could ever cost money.
+
+    Nothing this client calls is metered - the transcript and recording content APIs were,
+    and Microsoft stopped charging on 25 August 2025 - so this should be unreachable. It is
+    asserted anyway, because "unreachable" is a claim about someone else's price list and
+    the failure mode of being wrong is a bill.
+
+    Matched on the status, because 402 is the one response whose meaning is in the status
+    line rather than in a code, and it must beat whatever hint the body would have produced.
+    """
+    error = _graph_error(
+        http_error(402, {"error": {"code": "Forbidden", "message": "Payment required."}}),
+        "https://graph.microsoft.test/v1.0/x",
+    )
+    assert error.status == 402
+    assert error.code == "PaymentRequired"
+    assert "STOP" in error.hint
+    # Must not tell anyone to make it pass by paying.
+    assert "do not configure billing" in error.hint
+    # The Forbidden hint would otherwise have won on the outer code.
+    assert "New-CsApplicationAccessPolicy" not in error.hint
+
